@@ -67,9 +67,10 @@ def read_lidar_data(on_update):
             # This is the critical spot for the 65000 issue!
             dist_raw = raw_data[3] | (raw_data[4] << 8)
             distance = int(dist_raw / 4.0)  # C1 uses quarter-millimeters
-
-            # Filter: only pass plausible values (max 12 meters)
-            if distance > 0 and distance < 12000:
+            
+            # Prevent unstable datapoints
+            # 128 is a special value that indicates invalid data
+            if quality >= 30 and 0 <= angle <= 360 and 150 <= distance <= 12000 and distance != 128:
                 on_update(angle, distance, quality)
     except KeyboardInterrupt:
         print("\nStopping...")
