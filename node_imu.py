@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "robus-core"))
 
 import time
 import math
+import json
 import numpy as np
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 
@@ -191,53 +192,67 @@ while True:
         # Raw accelerometer (includes gravity) — always published
         accel = sensor.acceleration
         if accel is not None:
-            data["imu_accel_x"] = round(accel[0], 3)
-            data["imu_accel_y"] = round(accel[1], 3)
-            data["imu_accel_z"] = round(accel[2], 3)
+            data["imu_accel"] = json.dumps({
+                "x": round(accel[0], 3),
+                "y": round(accel[1], 3),
+                "z": round(accel[2], 3),
+            })
 
         # Orientation: roll / pitch / yaw + quaternion
         if PUBLISH_ORIENTATION and quat is not None:
             i, j, k, w = quat
             roll, pitch, yaw = quaternion_to_euler(i, j, k, w)
-            data["imu_roll"]   = round(roll,  2)
-            data["imu_pitch"]  = round(pitch, 2)
-            data["imu_yaw"]    = round(yaw,   2)
-            data["imu_quat_i"] = round(i, 4)
-            data["imu_quat_j"] = round(j, 4)
-            data["imu_quat_k"] = round(k, 4)
-            data["imu_quat_w"] = round(w, 4)
+            data["imu_orientation"] = json.dumps({
+                "roll":  round(roll,  2),
+                "pitch": round(pitch, 2),
+                "yaw":   round(yaw,   2),
+            })
+            data["imu_quaternion"] = json.dumps({
+                "i": round(i, 4), "j": round(j, 4),
+                "k": round(k, 4), "w": round(w, 4),
+            })
             if AUTOCALIBRATE:
                 # Roll and pitch are gravity-referenced — identical in cal frame.
                 # Yaw is offset so startup heading = 0°.
-                data["imu_roll_cal"]  = round(roll,  2)
-                data["imu_pitch_cal"] = round(pitch, 2)
-                data["imu_yaw_cal"]   = round((yaw - _startup_yaw) % 360, 2)
+                data["imu_orientation_cal"] = json.dumps({
+                    "roll":  round(roll,  2),
+                    "pitch": round(pitch, 2),
+                    "yaw":   round((yaw - _startup_yaw) % 360, 2),
+                })
 
         # Linear acceleration (gravity removed)
         if PUBLISH_ACCELERATION:
             la = sensor.linear_acceleration
             if la is not None:
-                data["imu_linear_accel_x"] = round(la[0], 3)
-                data["imu_linear_accel_y"] = round(la[1], 3)
-                data["imu_linear_accel_z"] = round(la[2], 3)
+                data["imu_linear_accel"] = json.dumps({
+                    "x": round(la[0], 3),
+                    "y": round(la[1], 3),
+                    "z": round(la[2], 3),
+                })
                 if AUTOCALIBRATE and quat is not None:
                     cx, cy, cz = _to_cal_frame(la, quat)
-                    data["imu_linear_accel_cal_x"] = round(float(cx), 3)
-                    data["imu_linear_accel_cal_y"] = round(float(cy), 3)
-                    data["imu_linear_accel_cal_z"] = round(float(cz), 3)
+                    data["imu_linear_accel_cal"] = json.dumps({
+                        "x": round(float(cx), 3),
+                        "y": round(float(cy), 3),
+                        "z": round(float(cz), 3),
+                    })
 
         # Angular velocity
         if PUBLISH_ANGULAR_VEL:
             gyr = sensor.gyro
             if gyr is not None:
-                data["imu_gyro_x"] = round(math.degrees(gyr[0]), 2)
-                data["imu_gyro_y"] = round(math.degrees(gyr[1]), 2)
-                data["imu_gyro_z"] = round(math.degrees(gyr[2]), 2)
+                data["imu_gyro"] = json.dumps({
+                    "x": round(math.degrees(gyr[0]), 2),
+                    "y": round(math.degrees(gyr[1]), 2),
+                    "z": round(math.degrees(gyr[2]), 2),
+                })
                 if AUTOCALIBRATE and quat is not None:
                     cx, cy, cz = _to_cal_frame(gyr, quat)
-                    data["imu_gyro_cal_x"] = round(math.degrees(float(cx)), 2)
-                    data["imu_gyro_cal_y"] = round(math.degrees(float(cy)), 2)
-                    data["imu_gyro_cal_z"] = round(math.degrees(float(cz)), 2)
+                    data["imu_gyro_cal"] = json.dumps({
+                        "x": round(math.degrees(float(cx)), 2),
+                        "y": round(math.degrees(float(cy)), 2),
+                        "z": round(math.degrees(float(cz)), 2),
+                    })
 
         if data:
             broker.setmulti(data)
