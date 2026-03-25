@@ -1,24 +1,40 @@
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
-import time
+import json
 import os
+
+DISPLAY_LIMIT = 10   # Max collection entries shown per value
 
 mb = TelemetryBroker()
 
-CURSOR_UP_LEFT = "\033[H"  # Springt nach ganz oben links (Home)
-HIDE_CURSOR = "\033[?25l"  # Versteckt den blinkenden Cursor (optional)
-SHOW_CURSOR = "\033[?25h"  # Zeigt ihn wieder an
+CURSOR_UP_LEFT = "\033[H"  # Jump to top-left (home)
+HIDE_CURSOR    = "\033[?25l"
+SHOW_CURSOR    = "\033[?25h"
 
-print(HIDE_CURSOR, end="") # Cursor verstecken für besseren Look
+
+def _truncate(value):
+    """If value is a JSON collection with more than DISPLAY_LIMIT entries, truncate it."""
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+
+    if isinstance(parsed, dict) and len(parsed) > DISPLAY_LIMIT:
+        truncated = dict(list(parsed.items())[:DISPLAY_LIMIT])
+        return json.dumps(truncated) + f" … (+{len(parsed) - DISPLAY_LIMIT} more)"
+    if isinstance(parsed, list) and len(parsed) > DISPLAY_LIMIT:
+        return json.dumps(parsed[:DISPLAY_LIMIT]) + f" … (+{len(parsed) - DISPLAY_LIMIT} more)"
+    return value
+
+
+print(HIDE_CURSOR, end="")
 
 while True:
     try:
-        #time.sleep(0.1)
         data = mb.getall()
         output = ""
         os.system('cls' if os.name == 'nt' else 'clear')
         for key, value in sorted(data.items()):
-            output = output + f"{key}" + " : " + f"{value}" +"\n"
-        
+            output += f"{key} : {_truncate(value)}\n"
         print(f"{CURSOR_UP_LEFT}{output}", end="\r", flush=True)
 
     except KeyboardInterrupt:
