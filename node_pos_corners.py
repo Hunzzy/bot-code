@@ -71,7 +71,7 @@ def on_update(key, value):
             )
             for a in sorted_angles
         ]
-        corner_xy = _filter_outliers(simple_corners(points))
+        corner_xy = _filter_outliers(simple_corners(points, window=5, proximity=0.3))
         corners = [
             (int(round(math.degrees(math.atan2(y, x)) % 360)), int(round(math.hypot(x, y) * 1000)))
             for x, y in corner_xy

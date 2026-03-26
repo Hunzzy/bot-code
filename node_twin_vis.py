@@ -7,9 +7,9 @@ import numpy as np
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 
 # ── Field configuration ───────────────────────────────────────────────────────
-FIELD_WIDTH  = 1.0   # metres
-FIELD_HEIGHT = 2.0   # metres
-ROBOT_RADIUS = 0.1   # metres
+FIELD_WIDTH  = 1.82   # metres
+FIELD_HEIGHT = 2.43   # metres
+ROBOT_RADIUS = 0.09   # metres
 # ─────────────────────────────────────────────────────────────────────────────
 
 mb = TelemetryBroker()
@@ -161,7 +161,8 @@ def _redraw():
         ax.set_ylim(-margin, FIELD_HEIGHT + margin)
     elif arrow_origin is not None:
         cx, cy  = arrow_origin
-        spread  = max(pts[:, 0].ptp(), pts[:, 1].ptp(), 0.5) / 2 + 0.3
+        spread  = max(pts[:, 0].max() - pts[:, 0].min(),
+                      pts[:, 1].max() - pts[:, 1].min(), 0.5) / 2 + 0.3
         ax.set_xlim(cx - spread, cx + spread)
         ax.set_ylim(cy - spread, cy + spread)
 

@@ -3,12 +3,14 @@ import json
 import math
 
 # ── Field configuration ────────────────────────────────────────────────────────
-FIELD_WIDTH  = 1.0   # metres, X axis (across width)
-FIELD_HEIGHT = 2.0   # metres, Y axis (along length)
-ROBOT_RADIUS = 0.1   # metres — robot centre cannot be closer than this to any wall
+FIELD_WIDTH  = 1.82   # metres, X axis (across width)
+FIELD_HEIGHT = 2.43   # metres, Y axis (along length)
+ROBOT_RADIUS = 0.09   # metres — robot centre cannot be closer than this to any wall
 
 # Tolerance around the valid region to absorb measurement noise.
-_MARGIN = 0.1    # metres
+# Must be strictly less than ROBOT_RADIUS, otherwise the radius constraint
+# is fully cancelled and positions inside the wall become accepted.
+_MARGIN = 0.05   # metres
 # Maximum distance between two candidate positions to be considered "the same".
 _OUTLIER_THRESHOLD = 0.15  # metres
 # ──────────────────────────────────────────────────────────────────────────────

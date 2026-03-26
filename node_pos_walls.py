@@ -3,12 +3,12 @@ import json
 import math
 
 # ── Line-detection parameters ─────────────────────────────────────────────────
-LINE_TOL       = 0.01   # metres — max gap between adjacent sorted values to stay
+LINE_TOL       = 0.02   # metres — max gap between adjacent sorted values to stay
                         #          in the same cluster (comparable to sensor noise)
 WALL_THICKNESS = 0.05   # metres — max total spread of a cluster in the normal
                         #          direction; rejects curved/scattered surfaces
 MIN_POINTS     = 20     # minimum lidar points for a cluster to be accepted
-MIN_SPAN       = 0.25   # metres — minimum extent along the wall axis
+MIN_SPAN       = 0.1   # metres — minimum extent along the wall axis
 # ─────────────────────────────────────────────────────────────────────────────
 
 mb = TelemetryBroker()
