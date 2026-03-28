@@ -1,6 +1,5 @@
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
-from lidar_utils.lidar_read import start_producer, parse_packet, SensorUnavailableError
-from lidar_utils import lidar_sim
+from lidar_utils import lidar_read_usb, lidar_read_uart, lidar_sim
 import json
 import queue
 
@@ -30,18 +29,25 @@ def on_scan(batch):
 
 if __name__ == "__main__":
     raw_queue = queue.Queue(maxsize=36000)  # ~10 full scans of headroom
-    try:
-        producer = start_producer(raw_queue)
-        print("Reading measurements (Ctrl+C to stop)...")
+
+    # Try USB first, then UART0, then simulation.
+    for _reader in (lidar_read_usb, lidar_read_uart):
         try:
-            while True:
-                result = parse_packet(raw_queue.get())
-                if result:
-                    on_measurement(*result)
-        except KeyboardInterrupt:
-            print("\nStopping...")
-            producer.stop()
-    except SensorUnavailableError:
+            producer = _reader.start_producer(raw_queue)
+            print(f"Sensor opened on {_reader.PORT}")
+            print("Reading measurements (Ctrl+C to stop)...")
+            try:
+                while True:
+                    result = _reader.parse_packet(raw_queue.get())
+                    if result:
+                        on_measurement(*result)
+            except KeyboardInterrupt:
+                print("\nStopping...")
+                producer.stop()
+            break
+        except _reader.SensorUnavailableError as e:
+            print(f"[{_reader.PORT}] not available: {e}")
+    else:
         if SIM_REPLACE:
             print("Falling back to simulated sensor data.")
 
@@ -58,4 +64,4 @@ if __name__ == "__main__":
             # lidar_sim.read_lidar_data(on_measurement, on_ready=_on_sim_ready,
             #                           on_heading=_on_sim_heading)
         else:
-            raise
+            raise lidar_read_usb.SensorUnavailableError("No sensor found on any port.")
