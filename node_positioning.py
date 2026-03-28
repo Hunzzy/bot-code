@@ -27,21 +27,15 @@ _FIELD_CORNERS = [
 mb = TelemetryBroker()
 
 # State updated by broker callbacks
-_field_angle   = None  # degrees — explicitly set field angle; None = not set
-_sim_heading   = None  # degrees — angle_f from lidar simulation, used as fallback
-_lidar              = {}    # {angle_deg (int): dist_mm (int)}  — sensor frame
+_imu_pitch = None  # degrees — from imu_pitch broker key; None = not yet received
+_lidar     = {}    # {angle_deg (int): dist_mm (int)}  — sensor frame
 _depth_corners      = []    # [(angle_deg, dist_mm), ...]  sensor polar frame
 _wall_corners       = []    # [[x, y], ...]  robot-centred field-aligned metres
 _wall_corners_hist  = []    # [[x, y], ...]  from histogram wall detection
 
 
-def _effective_field_angle():
-    """Return field_angle if explicitly set, fall back to sim_heading, then 0."""
-    if _field_angle is not None:
-        return _field_angle
-    if _sim_heading is not None:
-        return _sim_heading
-    return 0.0
+def _heading():
+    return _imu_pitch if _imu_pitch is not None else 0.0
 
 
 def _compute_position():
@@ -59,12 +53,9 @@ def _compute_position():
     if not _depth_corners and not _wall_corners and not _wall_corners_hist:
         return None
 
-    eff_angle = _effective_field_angle()
+    eff_angle = _heading()
     fa_rad    = math.radians(eff_angle)
-    source    = ("field_angle" if _field_angle is not None
-                 else "sim_heading" if _sim_heading is not None
-                 else "default")
-    print(f"[POS] field_angle={eff_angle:.1f}° (from {source})"
+    print(f"[POS] heading={eff_angle:.1f}°"
           f"  depth={len(_depth_corners)}  wall={len(_wall_corners)}"
           f"  wall_hist={len(_wall_corners_hist)}")
 
@@ -155,7 +146,7 @@ def _compute_position():
 
 
 def on_update(key, value):
-    global _field_angle, _sim_heading, _lidar, _depth_corners, _wall_corners, _wall_corners_hist
+    global _imu_pitch, _lidar, _depth_corners, _wall_corners, _wall_corners_hist
 
     if value is None:
         return
@@ -168,16 +159,9 @@ def on_update(key, value):
             pass
         return   # lidar alone doesn't trigger repositioning
 
-    if key == "field_angle":
+    if key == "imu_pitch":
         try:
-            _field_angle = float(value)
-        except (ValueError, TypeError):
-            pass
-        return   # position is recalculated when corners arrive
-
-    if key == "sim_heading":
-        try:
-            _sim_heading = float(value)
+            _imu_pitch = float(value)
         except (ValueError, TypeError):
             pass
         return
@@ -206,21 +190,15 @@ def on_update(key, value):
 
 
 if __name__ == "__main__":
-    # Seed values from broker; leave as None if not present (fallback chain applies)
     try:
-        val = mb.get("field_angle")
+        val = mb.get("imu_pitch")
         if val is not None:
-            _field_angle = float(val)
-    except Exception:
-        pass
-    try:
-        val = mb.get("sim_heading")
-        if val is not None:
-            _sim_heading = float(val)
+            _imu_pitch = float(val)
     except Exception:
         pass
 
-    mb.setcallback(["lidar", "field_angle", "sim_heading", "depth_corners", "wall_corners", "wall_corners_hist"], on_update)
+    mb.setcallback(["lidar", "imu_pitch",
+                    "depth_corners", "wall_corners", "wall_corners_hist"], on_update)
     try:
         mb.receiver_loop()
     except KeyboardInterrupt:

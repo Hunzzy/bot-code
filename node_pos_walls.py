@@ -19,18 +19,12 @@ HIST_MIN_PEAK_SEP = 0.15  # metres — minimum separation between two peaks on t
 
 mb = TelemetryBroker()
 
-_lidar       = {}   # angle_deg (int) → dist_mm (int)
-_field_angle = None # explicitly set from broker; None = not present
-_sim_heading = None # fallback from lidar simulation
+_lidar     = {}   # angle_deg (int) → dist_mm (int)
+_imu_pitch = None # degrees — from imu_pitch broker key; None = not yet received
 
 
-def _effective_field_angle():
-    """field_angle → sim_heading → 0."""
-    if _field_angle is not None:
-        return _field_angle
-    if _sim_heading is not None:
-        return _sim_heading
-    return 0.0
+def _heading():
+    return _imu_pitch if _imu_pitch is not None else 0.0
 
 
 def _cluster_1d(pairs, tolerance):
@@ -144,21 +138,14 @@ def _detect_walls_histogram(pts_field_aligned):
 
 
 def on_update(key, value):
-    global _lidar, _field_angle, _sim_heading
+    global _lidar, _imu_pitch
 
     if value is None:
         return
 
-    if key == "field_angle":
+    if key == "imu_pitch":
         try:
-            _field_angle = float(value)
-        except (ValueError, TypeError):
-            pass
-        return
-
-    if key == "sim_heading":
-        try:
-            _sim_heading = float(value)
+            _imu_pitch = float(value)
         except (ValueError, TypeError):
             pass
         return
@@ -170,12 +157,9 @@ def on_update(key, value):
         except (json.JSONDecodeError, TypeError, ValueError):
             return
 
-        fa     = _effective_field_angle()
+        fa     = _heading()
         fa_rad = math.radians(fa)
-        source = ("field_angle" if _field_angle is not None
-                  else "sim_heading" if _sim_heading is not None
-                  else "default (0°)")
-        print(f"[WALLS] field_angle={fa:.1f}° (from {source})  points: {len(_lidar)}")
+        print(f"[WALLS] heading={fa:.1f}°  points: {len(_lidar)}")
 
         # Rotate all lidar points into the field coordinate frame:
         # field_direction = lidar_angle + field_angle
@@ -197,16 +181,14 @@ def on_update(key, value):
 
 
 if __name__ == "__main__":
-    # Seed state from broker so existing values are used immediately
-    for key, store in [("field_angle", "_field_angle"), ("sim_heading", "_sim_heading")]:
-        try:
-            val = mb.get(key)
-            if val is not None:
-                globals()[store] = float(val)
-        except Exception:
-            pass
+    try:
+        val = mb.get("imu_pitch")
+        if val is not None:
+            _imu_pitch = float(val)
+    except Exception:
+        pass
 
-    mb.setcallback(["lidar", "field_angle", "sim_heading"], on_update)
+    mb.setcallback(["lidar", "imu_pitch"], on_update)
     try:
         mb.receiver_loop()
     except KeyboardInterrupt:

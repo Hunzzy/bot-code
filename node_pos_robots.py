@@ -61,22 +61,17 @@ MAX_ROBOT_SPEED  = 2.0    # m/s
 
 mb = TelemetryBroker()
 
-_lidar        = {}    # {angle_deg (int): dist_mm (int)}
-_robot_pos    = None  # (x, y) metres, in field frame
-_field_angle  = None  # degrees — explicitly set; None = not set
-_sim_heading  = None  # degrees — fallback from simulation
+_lidar     = {}   # {angle_deg (int): dist_mm (int)}
+_robot_pos = None # (x, y) metres, in field frame
+_imu_pitch = None # degrees — from imu_pitch broker key; None = not yet received
 
 # ── Tracking state ────────────────────────────────────────────────────────────
 _tracked = {}   # id → {"x","y","vx","vy","t","lost","history"}
 _next_id = 1    # monotonically increasing ID counter
 
 
-def _effective_field_angle():
-    if _field_angle is not None:
-        return _field_angle
-    if _sim_heading is not None:
-        return _sim_heading
-    return 0.0
+def _heading():
+    return _imu_pitch if _imu_pitch is not None else 0.0
 
 
 # ── Coordinate conversion ─────────────────────────────────────────────────────
@@ -439,7 +434,7 @@ def _detect_robots():
 
     now    = time.monotonic()
     rx, ry = _robot_pos
-    fa_rad = math.radians(_effective_field_angle())
+    fa_rad = math.radians(_heading())
 
     # Build angularly-sorted scan with field coordinates and interior flag
     sorted_scan = []
@@ -498,7 +493,7 @@ def _detect_robots():
 # ── Broker interface ──────────────────────────────────────────────────────────
 
 def on_update(key, value):
-    global _lidar, _robot_pos, _field_angle, _sim_heading
+    global _lidar, _robot_pos, _imu_pitch
 
     if value is None:
         return
@@ -517,15 +512,9 @@ def on_update(key, value):
         except Exception:
             return
 
-    elif key == "field_angle":
+    elif key == "imu_pitch":
         try:
-            _field_angle = float(value)
-        except (ValueError, TypeError):
-            return
-
-    elif key == "sim_heading":
-        try:
-            _sim_heading = float(value)
+            _imu_pitch = float(value)
         except (ValueError, TypeError):
             return
 
@@ -538,14 +527,12 @@ def on_update(key, value):
 
 
 if __name__ == "__main__":
-    for attr, broker_key in [("_field_angle", "field_angle"),
-                              ("_sim_heading", "sim_heading")]:
-        try:
-            val = mb.get(broker_key)
-            if val is not None:
-                globals()[attr] = float(val)
-        except Exception:
-            pass
+    try:
+        val = mb.get("imu_pitch")
+        if val is not None:
+            _imu_pitch = float(val)
+    except Exception:
+        pass
     try:
         raw = mb.get("robot_position")
         if raw:
@@ -554,10 +541,7 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    mb.setcallback(
-        ["lidar", "robot_position", "field_angle", "sim_heading"],
-        on_update,
-    )
+    mb.setcallback(["lidar", "robot_position", "imu_pitch"], on_update)
     try:
         mb.receiver_loop()
     except KeyboardInterrupt:

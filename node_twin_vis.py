@@ -17,8 +17,7 @@ mb = TelemetryBroker()
 # ── Broker state ──────────────────────────────────────────────────────────────
 _lidar            = {}    # {angle_deg (int): dist_mm (int)}  — sensor frame
 _detection_origin = None  # (rx, ry) position snapshot from the last detection cycle
-_field_angle      = None  # float | None
-_sim_heading      = None  # float | None
+_imu_pitch        = None  # degrees — from imu_pitch broker key; None = not yet received
 _robot_pos        = None  # (x, y) metres, field frame
 _other_robots     = []    # [[x, y, method, id], ...]  field frame
 _corners      = []    # [[angle_deg, dist_mm], ...]  sensor frame
@@ -35,12 +34,8 @@ _needs_redraw  = threading.Event()
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _effective_field_angle():
-    if _field_angle is not None:
-        return _field_angle
-    if _sim_heading is not None:
-        return _sim_heading
-    return 0.0
+def _heading():
+    return _imu_pitch if _imu_pitch is not None else 0.0
 
 
 # ── Matplotlib setup ──────────────────────────────────────────────────────────
@@ -60,7 +55,7 @@ def _lidar_to_field(angle_deg, dist_mm, fa_rad, origin=(0.0, 0.0)):
 def _redraw():
     ax.cla()
 
-    fa          = _effective_field_angle()
+    fa          = _heading()
     fa_rad      = math.radians(fa)
     known_pos   = _robot_pos is not None
     origin      = _robot_pos if known_pos else (0.0, 0.0)
@@ -237,12 +232,9 @@ def _redraw():
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
     pos_str = f"({origin[0]:.2f}, {origin[1]:.2f})" if known_pos else "unknown"
-    src     = ("field_angle" if _field_angle is not None
-               else "sim_heading" if _sim_heading is not None
-               else "default")
     ax.set_title(
         f"Twin Visualisation\n"
-        f"pos={pos_str}  field_angle={fa:.1f}° ({src})"
+        f"pos={pos_str}  heading={fa:.1f}°"
         f"  walls={len(_walls)}/hist={len(_walls_hist)}  corners={len(_corners)}  bots={len(_other_robots)}"
     )
     ax.grid(True, alpha=0.25, zorder=0)
@@ -253,7 +245,7 @@ def _redraw():
 
 # ── Broker callbacks ──────────────────────────────────────────────────────────
 def on_update(key, value):
-    global _lidar, _detection_origin, _field_angle, _sim_heading
+    global _lidar, _detection_origin, _imu_pitch
     global _robot_pos, _other_robots, _corners, _wall_corners, _wall_corners_hist
     global _walls, _walls_hist, _positioning_corner
     global _position_history, _other_robots_history
@@ -267,11 +259,8 @@ def on_update(key, value):
                 raw = json.loads(value)
                 _lidar = {int(k): int(v) for k, v in raw.items()}
 
-            elif key == "field_angle":
-                _field_angle = float(value)
-
-            elif key == "sim_heading":
-                _sim_heading = float(value)
+            elif key == "imu_pitch":
+                _imu_pitch = float(value)
 
             elif key == "robot_position":
                 p = json.loads(value)
@@ -328,8 +317,7 @@ def on_update(key, value):
 if __name__ == "__main__":
     # Seed existing broker values so the display is populated immediately
     _SEEDS = {
-        "field_angle":    lambda v: float(v),
-        "sim_heading":    lambda v: float(v),
+        "imu_pitch":      lambda v: float(v),
         "lidar":          lambda v: {int(k): int(x) for k, x in json.loads(v).items()},
         "robot_position": lambda v: (float(json.loads(v)["x"]), float(json.loads(v)["y"])),
         "other_robots":   lambda v: [[float(r["x"]), float(r["y"]), r.get("method", ""), int(r.get("id", 0))]
@@ -344,8 +332,7 @@ if __name__ == "__main__":
         "other_robots_history":  lambda v: json.loads(v),
     }
     _TARGETS = {
-        "field_angle":    "_field_angle",
-        "sim_heading":    "_sim_heading",
+        "imu_pitch":      "_imu_pitch",
         "lidar":          "_lidar",
         "robot_position": "_robot_pos",
         "other_robots":   "_other_robots",
