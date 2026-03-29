@@ -103,6 +103,84 @@ def _process_frame(frame):
     }
 
 
+class _SimBall:
+    """
+    Physics-based ball simulation that renders synthetic BGR camera frames.
+
+    The ball moves in 3-D camera space (x_mm horizontal, z_mm depth) and
+    bounces off the depth limits and the horizontal FOV boundary.  Each call
+    to render() advances the simulation by the elapsed wall-clock time and
+    returns a frame that _process_frame() can analyse exactly like a real one.
+    """
+
+    DIST_MIN_MM  =  300.0   # nearest the ball may come to the camera
+    DIST_MAX_MM  = 2000.0   # furthest the ball may be from the camera
+    SPEED_MM_S   =  300.0   # initial speed magnitude
+    # Keep the ball within this fraction of the half-FOV to avoid clipping
+    FOV_MARGIN   =  0.85
+
+    def __init__(self):
+        import random
+        rng = random.Random()
+
+        # Focal length in pixels — inverse of the degrees-per-pixel ratio
+        self._focal_px = (RES_WIDTH / 2.0) / math.tan(math.radians(FOV_DEG / 2.0))
+
+        # Initial 3-D position
+        self._z = rng.uniform(self.DIST_MIN_MM, self.DIST_MAX_MM)
+        horiz_limit = math.tan(math.radians(FOV_DEG / 2.0)) * self._z * self.FOV_MARGIN
+        self._x = rng.uniform(-horiz_limit, horiz_limit)
+
+        # Initial velocity in a random direction
+        angle = rng.uniform(0, 2 * math.pi)
+        self._vx = math.cos(angle) * self.SPEED_MM_S
+        self._vz = math.sin(angle) * self.SPEED_MM_S
+
+        self._last_t = time.monotonic()
+
+        # Pre-compute a solid orange BGR colour that lies within LOWER/UPPER_ORANGE.
+        # HSV(15, 200, 220) is safely mid-range for both hue and saturation.
+        _hsv = np.array([[[15, 200, 220]]], dtype=np.uint8)
+        bgr  = cv2.cvtColor(_hsv, cv2.COLOR_HSV2BGR)[0, 0]
+        self._orange_bgr = (int(bgr[0]), int(bgr[1]), int(bgr[2]))
+
+    def render(self):
+        """Advance physics and return a synthetic BGR frame."""
+        now = time.monotonic()
+        dt  = now - self._last_t
+        self._last_t = now
+
+        # Advance position
+        self._x += self._vx * dt
+        self._z += self._vz * dt
+
+        # Bounce off depth limits
+        if self._z < self.DIST_MIN_MM:
+            self._z  = self.DIST_MIN_MM
+            self._vz = abs(self._vz)
+        elif self._z > self.DIST_MAX_MM:
+            self._z  = self.DIST_MAX_MM
+            self._vz = -abs(self._vz)
+
+        # Bounce off horizontal FOV boundary (recomputed at current depth)
+        horiz_limit = math.tan(math.radians(FOV_DEG / 2.0)) * self._z * self.FOV_MARGIN
+        if self._x < -horiz_limit:
+            self._x  = -horiz_limit
+            self._vx = abs(self._vx)
+        elif self._x > horiz_limit:
+            self._x  = horiz_limit
+            self._vx = -abs(self._vx)
+
+        # Project 3-D position onto the virtual sensor
+        px       = int(CENTER_X + (self._x / self._z) * self._focal_px)
+        radius_px = max(1, int((BALL_RADIUS_MM / self._z) * self._focal_px))
+
+        # Render: black background with one filled orange circle
+        frame = np.zeros((RES_HEIGHT, RES_WIDTH, 3), dtype=np.uint8)
+        cv2.circle(frame, (px, RES_HEIGHT // 2), radius_px, self._orange_bgr, -1)
+        return frame
+
+
 if __name__ == "__main__":
     if not _hw_available:
         raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
@@ -113,20 +191,27 @@ if __name__ == "__main__":
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  RES_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_HEIGHT)
 
-    if not cap.isOpened():
-        raise SystemExit("[VISION] Could not open camera on device 0.")
-
-    print(f"[VISION] Camera opened ({RES_WIDTH}x{RES_HEIGHT}). "
-          "Running detection loop (Ctrl+C to stop)...")
+    if cap.isOpened():
+        print(f"[VISION] Camera opened ({RES_WIDTH}x{RES_HEIGHT}). "
+              "Running detection loop (Ctrl+C to stop)...")
+        sim = None
+    else:
+        cap.release()
+        cap = None
+        sim = _SimBall()
+        print("[VISION] Camera not available — falling back to simulated ball.")
 
     last_log_time = time.time()
 
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("[VISION] ERROR: Camera connection lost!")
-                break
+            if sim is not None:
+                frame = sim.render()
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    print("[VISION] ERROR: Camera connection lost!")
+                    break
 
             with _perf.measure("frame"):
                 result = _process_frame(frame)
@@ -146,6 +231,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[VISION] Stopped by user.")
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
         mb.close()
         print("[VISION] Camera closed. System stopped.")
