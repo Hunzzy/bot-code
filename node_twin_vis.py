@@ -31,6 +31,7 @@ _other_robots      = []
 _walls                = []
 _position_history     = []
 _other_robots_history = []
+_ball_pos             = None  # {"x": float, "y": float} or None
 
 _state_lock   = threading.Lock()
 _needs_redraw = threading.Event()
@@ -112,6 +113,13 @@ _art_pos_hist = ax.scatter([], [], s=18, zorder=5, animated=True,
 # Robot history scatter
 _art_bot_hist = ax.scatter([], [], s=18, zorder=5, animated=True,
                             edgecolors='none')
+
+# Ball
+_BALL_RADIUS = 0.021   # metres (21 mm physical radius)
+_art_ball = patches.Circle((0, 0), _BALL_RADIUS,
+    lw=1.5, edgecolor='darkorange', facecolor='orange',
+    zorder=9, animated=True, visible=False)
+ax.add_patch(_art_ball)
 
 # Status text (inside axes, top-left corner)
 _art_status = ax.text(0.01, 0.99, '', transform=ax.transAxes,
@@ -212,6 +220,13 @@ def _redraw():
     )
     _art_arrow.set_visible(True)
 
+    # ── Ball ──────────────────────────────────────────────────────────────────
+    if _ball_pos is not None:
+        _art_ball.set_center((_ball_pos["x"], _ball_pos["y"]))
+        _art_ball.set_visible(True)
+    else:
+        _art_ball.set_visible(False)
+
     # ── Walls ─────────────────────────────────────────────────────────────────
     _update_wall_lines(_walls, _art_walls, origin)
 
@@ -258,6 +273,7 @@ def _redraw():
         _art_lidar,
         _art_self, *_art_bots, *_art_blbls,
         _art_arrow,
+        _art_ball,
         *_art_walls,
         _art_pos_hist, _art_bot_hist,
         _art_status,
@@ -270,7 +286,7 @@ def _redraw():
 def on_update(key, value):
     global _lidar, _detection_origin, _detection_heading, _imu_pitch
     global _robot_pos, _other_robots, _walls
-    global _position_history, _other_robots_history
+    global _position_history, _other_robots_history, _ball_pos
 
     if value is None:
         return
@@ -312,6 +328,10 @@ def on_update(key, value):
             elif key == "other_robots_history":
                 _other_robots_history = json.loads(value)
 
+            elif key == "ball":
+                payload = json.loads(value)
+                _ball_pos = payload.get("global_pos")
+
     except Exception as e:
         print(f"[VIS] parse error on {key!r}: {e}")
         return
@@ -329,6 +349,7 @@ if __name__ == "__main__":
         "lidar_walls":          lambda v: json.loads(v),
         "position_history":     lambda v: json.loads(v),
         "other_robots_history": lambda v: json.loads(v),
+        "ball":                 lambda v: json.loads(v).get("global_pos"),
     }
     _TARGETS = {
         "imu_pitch":            "_imu_pitch",
@@ -338,6 +359,7 @@ if __name__ == "__main__":
         "lidar_walls":          "_walls",
         "position_history":     "_position_history",
         "other_robots_history": "_other_robots_history",
+        "ball":                 "_ball_pos",
     }
     for key, parse in _SEEDS.items():
         try:

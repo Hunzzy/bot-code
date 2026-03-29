@@ -2,6 +2,7 @@ from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 from utils.perf_monitor import PerfMonitor
 import json
 import math
+import threading
 import time
 
 # ── Camera specifications (Raspberry Pi Cam V2) ────────────────────────────────
@@ -22,6 +23,9 @@ MIN_RADIUS      = 5    # Minimum ball radius in pixels (filters noise)
 # ── Ball physical size ─────────────────────────────────────────────────────────
 BALL_RADIUS_MM = 21.0  # Real-world ball radius in mm (used for distance calc)
 
+# ── Robot geometry ────────────────────────────────────────────────────────────
+ROBOT_RADIUS = 0.09   # metres — camera sits one radius ahead of the robot centre
+
 # ── Broker key ────────────────────────────────────────────────────────────────
 BROKER_KEY = "ball"
 
@@ -31,6 +35,9 @@ SIM_REPLACE = False  # Set True to force simulated ball even if a camera is foun
 
 mb    = TelemetryBroker()
 _perf = PerfMonitor("node_vision", broker=mb, print_every=100)
+
+_robot_pos = None   # (x, y) metres — from robot_position broker key
+_imu_pitch = None   # degrees       — from imu_pitch broker key
 
 _hw_available = False
 try:
@@ -183,9 +190,67 @@ class _SimBall:
         return frame
 
 
+def _on_broker_update(key, value):
+    global _robot_pos, _imu_pitch
+    if value is None:
+        return
+    if key == "robot_position":
+        try:
+            p = json.loads(value)
+            _robot_pos = (float(p["x"]), float(p["y"]))
+        except Exception:
+            pass
+    elif key == "imu_pitch":
+        try:
+            _imu_pitch = float(value)
+        except Exception:
+            pass
+
+
+def _compute_global_pos(distance_cm, angle_deg):
+    """
+    Project the detected ball into the global field frame.
+
+    The camera is mounted one robot radius ahead of the robot centre,
+    facing in the heading direction.  The ball bearing combines the
+    heading with the camera's measured horizontal angle to the ball.
+    Returns {"x": float, "y": float} or None if position/heading unknown.
+    """
+    if _robot_pos is None or _imu_pitch is None:
+        return None
+    rx, ry      = _robot_pos
+    heading_rad = math.radians(_imu_pitch)
+    cam_x = rx + ROBOT_RADIUS * math.cos(heading_rad)
+    cam_y = ry + ROBOT_RADIUS * math.sin(heading_rad)
+    bearing = heading_rad + math.radians(angle_deg)
+    dist_m  = distance_cm / 100.0
+    return {
+        "x": round(cam_x + dist_m * math.cos(bearing), 3),
+        "y": round(cam_y + dist_m * math.sin(bearing), 3),
+    }
+
+
 if __name__ == "__main__":
     if not _hw_available:
         raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
+
+    # Seed broker values and start receiver thread
+    try:
+        val = mb.get("robot_position")
+        if val is not None:
+            p = json.loads(val)
+            _robot_pos = (float(p["x"]), float(p["y"]))
+    except Exception:
+        pass
+    try:
+        val = mb.get("imu_pitch")
+        if val is not None:
+            _imu_pitch = float(val)
+    except Exception:
+        pass
+    mb.setcallback(["robot_position", "imu_pitch"], _on_broker_update)
+    threading.Thread(target=mb.receiver_loop, daemon=True,
+                     name="broker-receiver").start()
 
     print("[VISION] Starting headless vision system...")
 
@@ -222,6 +287,12 @@ if __name__ == "__main__":
 
             with _perf.measure("frame"):
                 result = _process_frame(frame)
+                if result["command"] != "NO_BALL":
+                    result["global_pos"] = _compute_global_pos(
+                        result["distance_cm"], result["angle_deg"]
+                    )
+                else:
+                    result["global_pos"] = None
                 mb.set(BROKER_KEY, json.dumps(result))
 
             # Log to console at most once per second
