@@ -63,6 +63,12 @@ _last_ball_y  = None
 _last_ball_vx = 0.0    # m/s
 _last_ball_vy = 0.0
 
+# Incremental hidden-physics state — advanced one frame at a time so that
+# (a) robot positions used are always current and (b) velocity reflects
+# the direction after each bounce.
+_hidden_state   = None    # [x, y, vx, vy] or None
+_hidden_state_t = -999.0  # monotonic time of last hidden-state update
+
 _hw_available = False
 try:
     import cv2
@@ -359,7 +365,7 @@ def _extrapolate_ball(x, y, vx, vy, dt, robots=None):
                         vx -= 2 * dot * nx
                         vy -= 2 * dot * ny
 
-    return round(x, 3), round(y, 3)
+    return x, y, vx, vy
 
 
 def _all_robot_positions():
@@ -516,23 +522,41 @@ if __name__ == "__main__":
                     if spd > MAX_BALL_SPEED:
                         vx_fit *= MAX_BALL_SPEED / spd
                         vy_fit *= MAX_BALL_SPEED / spd
-                    # Persist velocity so hidden-position extrapolation stays valid
                     _last_ball_vx = vx_fit
                     _last_ball_vy = vy_fit
 
-                # ── Hidden-position extrapolation ─────────────────────────────
-                if gpos is None and _last_ball_x is not None:
-                    elapsed = now_t - _last_detection_t
-                    hx, hy  = _extrapolate_ball(
-                        _last_ball_x, _last_ball_y,
-                        _last_ball_vx, _last_ball_vy,
-                        elapsed,
-                        robots=_all_robot_positions(),
-                    )
-                    hidden_pos = {"x": hx, "y": hy}
+                # ── Hidden-position extrapolation (incremental) ───────────────
+                # Advance the hidden state one frame at a time so robot
+                # positions are always current and post-bounce velocity is live.
+                pub_vx, pub_vy = _last_ball_vx, _last_ball_vy
 
-                result["vx"]         = round(_last_ball_vx, 3)
-                result["vy"]         = round(_last_ball_vy, 3)
+                if gpos is not None:
+                    # Ball just became visible — discard hidden state
+                    _hidden_state   = None
+                    _hidden_state_t = -999.0
+                elif _last_ball_x is not None:
+                    if _hidden_state is None:
+                        # Initialise hidden state from last detected position
+                        _hidden_state   = [_last_ball_x, _last_ball_y,
+                                           _last_ball_vx, _last_ball_vy]
+                        _hidden_state_t = _last_detection_t
+                    dt_frame = now_t - _hidden_state_t
+                    if dt_frame > 0:
+                        hx, hy, hvx, hvy = _extrapolate_ball(
+                            _hidden_state[0], _hidden_state[1],
+                            _hidden_state[2], _hidden_state[3],
+                            dt_frame,
+                            robots=_all_robot_positions(),
+                        )
+                        _hidden_state   = [hx, hy, hvx, hvy]
+                        _hidden_state_t = now_t
+                    hidden_pos = {"x": round(_hidden_state[0], 3),
+                                  "y": round(_hidden_state[1], 3)}
+                    pub_vx = _hidden_state[2]
+                    pub_vy = _hidden_state[3]
+
+                result["vx"]         = round(pub_vx, 3)
+                result["vy"]         = round(pub_vy, 3)
                 result["hidden_pos"] = hidden_pos
 
                 if sim is not None:
