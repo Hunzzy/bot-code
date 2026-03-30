@@ -34,7 +34,7 @@ _other_robots_history = []
 _ball_pos             = None  # {"x": float, "y": float} or None — detected position
 _ball_vx              = None  # m/s — fitted horizontal velocity
 _ball_vy              = None  # m/s — fitted vertical velocity
-_ball_predicted_pos   = None  # {"x": float, "y": float} or None — predicted position
+_ball_predicted_path  = None  # [[x, y], ...] or None — predicted bounce trajectory
 _ball_history         = []    # [{"x", "y", "t"}, ...] from ball_history key
 _sim_ball_pos         = None  # {"x": float, "y": float} or None — true sim position
 _sim_state            = None  # {"robot": [x,y], "obstacles": [[x,y],...]} from sim_state key
@@ -136,11 +136,9 @@ _art_ball_arrow = FancyArrowPatch((0, 0), (0.1, 0),
     zorder=9, animated=True, visible=False)
 ax.add_patch(_art_ball_arrow)
 
-# Ball predicted position — dashed ghost circle
-_art_ball_pred = patches.Circle((0, 0), _BALL_RADIUS,
-    lw=1.5, edgecolor='darkorange', facecolor='none', ls='--',
-    zorder=8, animated=True, visible=False)
-ax.add_patch(_art_ball_pred)
+# Ball predicted path — dashed polyline through bounce waypoints
+(_art_ball_path,) = ax.plot([], [], color='darkorange', lw=1.0, ls='--',
+    zorder=8, animated=True)
 
 # Sim ground-truth crosses (shown alongside the detected circles).
 # Use Line2D (plot) rather than scatter — simpler blitting semantics,
@@ -283,12 +281,14 @@ def _redraw():
     else:
         _art_ball_arrow.set_visible(False)
 
-    # ── Ball predicted position ───────────────────────────────────────────────
-    if _ball_predicted_pos is not None:
-        _art_ball_pred.set_center((_ball_predicted_pos["x"], _ball_predicted_pos["y"]))
-        _art_ball_pred.set_visible(True)
+    # ── Ball predicted path ───────────────────────────────────────────────────
+    if _ball_predicted_path and len(_ball_predicted_path) >= 2:
+        _art_ball_path.set_data(
+            [p[0] for p in _ball_predicted_path],
+            [p[1] for p in _ball_predicted_path],
+        )
     else:
-        _art_ball_pred.set_visible(False)
+        _art_ball_path.set_data([], [])
 
     # ── Sim ground-truth crosses ───────────────────────────────────────────────
     if _sim_ball_pos is not None:
@@ -353,7 +353,7 @@ def _redraw():
         _art_lidar,
         _art_self, *_art_bots, *_art_blbls,
         _art_arrow,
-        _art_ball, _art_ball_hist, _art_ball_arrow, _art_ball_pred,
+        _art_ball, _art_ball_hist, _art_ball_arrow, _art_ball_path,
         _art_sim_ball, _art_sim_self, *_art_sim_obs,
         *_art_walls,
         _art_pos_hist, _art_bot_hist,
@@ -368,7 +368,7 @@ def on_update(key, value):
     global _lidar, _detection_origin, _detection_heading, _imu_pitch
     global _robot_pos, _other_robots, _walls
     global _position_history, _other_robots_history
-    global _ball_pos, _ball_vx, _ball_vy, _ball_predicted_pos, _ball_history
+    global _ball_pos, _ball_vx, _ball_vy, _ball_predicted_path, _ball_history
     global _sim_ball_pos, _sim_state
 
     if value is None:
@@ -413,11 +413,11 @@ def on_update(key, value):
 
             elif key == "ball":
                 payload           = json.loads(value)
-                _ball_pos         = payload.get("global_pos")
-                _ball_vx          = payload.get("vx")
-                _ball_vy          = payload.get("vy")
-                _ball_predicted_pos = payload.get("predicted_pos")
-                _sim_ball_pos     = payload.get("sim_pos")
+                _ball_pos          = payload.get("global_pos")
+                _ball_vx           = payload.get("vx")
+                _ball_vy           = payload.get("vy")
+                _ball_predicted_path = payload.get("predicted_path")
+                _sim_ball_pos      = payload.get("sim_pos")
 
             elif key == "ball_history":
                 _ball_history = json.loads(value)

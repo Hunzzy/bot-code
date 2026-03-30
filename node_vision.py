@@ -35,8 +35,8 @@ FIELD_HEIGHT = 2.43
 BALL_VEL_HISTORY_N   = 10    # rolling history length
 BALL_VEL_HISTORY_MIN = 3     # minimum samples before velocity is trusted
 BALL_VEL_MIN_DT      = 0.05  # seconds — min elapsed time between history samples
-MAX_BALL_SPEED       = 3.0   # m/s — hard cap after fitting
-BALL_PREDICT_T       = 1.0   # seconds — prediction horizon
+MAX_BALL_SPEED            = 3.0  # m/s — hard cap after fitting
+BALL_PREDICT_MAX_BOUNCES  = 8    # stop prediction after this many wall bounces
 
 # ── Broker key ────────────────────────────────────────────────────────────────
 BROKER_KEY = "ball"
@@ -313,21 +313,44 @@ def _fit_ball_velocity(history):
     return float(coeffs[0, 0]), float(coeffs[0, 1])
 
 
-def _predict_ball(x, y, vx, vy):
+def _predict_ball_path(x, y, vx, vy):
     """
-    Predict ball position after BALL_PREDICT_T seconds, bouncing off field walls.
+    Analytical wall-bounce trajectory — no fixed time horizon.
+
+    Returns a list of [x, y] waypoints: the starting position plus every
+    wall-intersection point, up to BALL_PREDICT_MAX_BOUNCES bounces.
+    If the ball is stationary the list contains only the current position.
     """
     r    = BALL_RADIUS_MM / 1000.0
-    dt   = BALL_PREDICT_T
-    n    = max(1, min(int(dt / 0.02) + 1, 100))
-    step = dt / n
-    for _ in range(n):
-        x += vx * step;  y += vy * step
-        if   x < r:                    x = r;                    vx =  abs(vx)
-        elif x > FIELD_WIDTH  - r:     x = FIELD_WIDTH  - r;     vx = -abs(vx)
-        if   y < r:                    y = r;                    vy =  abs(vy)
-        elif y > FIELD_HEIGHT - r:     y = FIELD_HEIGHT - r;     vy = -abs(vy)
-    return round(x, 3), round(y, 3)
+    lo_x, hi_x = r, FIELD_WIDTH  - r
+    lo_y, hi_y = r, FIELD_HEIGHT - r
+
+    path = [[round(x, 3), round(y, 3)]]
+    if math.hypot(vx, vy) < 1e-6:
+        return path
+
+    for _ in range(BALL_PREDICT_MAX_BOUNCES):
+        # Time to each wall (inf if moving away or stationary on that axis)
+        tx = (hi_x - x) / vx if vx > 1e-9 else ((lo_x - x) / vx if vx < -1e-9 else math.inf)
+        ty = (hi_y - y) / vy if vy > 1e-9 else ((lo_y - y) / vy if vy < -1e-9 else math.inf)
+        t  = min(tx, ty)
+        if t <= 0 or not math.isfinite(t):
+            break
+
+        x += vx * t
+        y += vy * t
+
+        # Clamp to field and flip velocity
+        if tx <= ty:
+            x  = hi_x if vx > 0 else lo_x
+            vx = -vx
+        if ty <= tx:
+            y  = hi_y if vy > 0 else lo_y
+            vy = -vy
+
+        path.append([round(x, 3), round(y, 3)])
+
+    return path
 
 
 def _on_broker_update(key, value):
@@ -469,12 +492,11 @@ if __name__ == "__main__":
                         ball_vx *= MAX_BALL_SPEED / spd
                         ball_vy *= MAX_BALL_SPEED / spd
                     if gpos is not None:
-                        px, py = _predict_ball(gpos["x"], gpos["y"], ball_vx, ball_vy)
-                        ball_pred = {"x": px, "y": py}
+                        ball_pred = _predict_ball_path(gpos["x"], gpos["y"], ball_vx, ball_vy)
 
-                result["vx"]            = round(ball_vx, 3)
-                result["vy"]            = round(ball_vy, 3)
-                result["predicted_pos"] = ball_pred
+                result["vx"]             = round(ball_vx, 3)
+                result["vy"]             = round(ball_vy, 3)
+                result["predicted_path"] = ball_pred
 
                 if sim is not None:
                     result["sim_pos"] = sim.pos
