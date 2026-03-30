@@ -38,6 +38,7 @@ _perf = PerfMonitor("node_vision", broker=mb, print_every=100)
 
 _robot_pos = None   # (x, y) metres — from robot_position broker key
 _imu_pitch = None   # degrees       — from imu_pitch broker key
+_sim_state = None   # {"robot": [x,y], "obstacles": [[x,y],...]} — from sim_state broker key
 
 _hw_available = False
 try:
@@ -116,42 +117,94 @@ class _SimBall:
     """
     Physics-based ball simulation that renders synthetic BGR camera frames.
 
-    The ball moves in 3-D camera space (x_mm horizontal, z_mm depth) and
-    bounces off the depth limits and the horizontal FOV boundary.  Each call
-    to render() advances the simulation by the elapsed wall-clock time and
-    returns a frame that _process_frame() can analyse exactly like a real one.
+    The ball lives in global field coordinates (metres) and bounces off the
+    field walls and all simulated robots.  Each call to render() advances the
+    physics, checks whether any obstacle robot occludes the camera→ball line,
+    then projects the ball onto the virtual sensor and returns a BGR frame
+    that _process_frame() can analyse exactly like a real one.
+
+    Robot positions are read from the module-level _sim_state dict (published
+    by node_lidar when running in simulation mode).
     """
 
-    DIST_MIN_MM  =  300.0   # nearest the ball may come to the camera
-    DIST_MAX_MM  = 2000.0   # furthest the ball may be from the camera
-    SPEED_MM_S   =  300.0   # initial speed magnitude
-    # Keep the ball within this fraction of the half-FOV to avoid clipping
-    FOV_MARGIN   =  0.85
+    FIELD_W  = 1.82
+    FIELD_H  = 2.43
+    BALL_R   = BALL_RADIUS_MM / 1000.0   # 0.021 m
+    MARGIN   = BALL_R + 0.02             # minimum distance from walls
+    SPEED    = 0.6                        # m/s — initial ball speed
 
     def __init__(self):
         import random
-        rng = random.Random()
 
-        # Focal length in pixels — inverse of the degrees-per-pixel ratio
+        # Focal length in pixels — derived from horizontal FOV
         self._focal_px = (RES_WIDTH / 2.0) / math.tan(math.radians(FOV_DEG / 2.0))
 
-        # Initial 3-D position
-        self._z = rng.uniform(self.DIST_MIN_MM, self.DIST_MAX_MM)
-        horiz_limit = math.tan(math.radians(FOV_DEG / 2.0)) * self._z * self.FOV_MARGIN
-        self._x = rng.uniform(-horiz_limit, horiz_limit)
-
-        # Initial velocity in a random direction
-        angle = rng.uniform(0, 2 * math.pi)
-        self._vx = math.cos(angle) * self.SPEED_MM_S
-        self._vz = math.sin(angle) * self.SPEED_MM_S
+        # Initial ball position: random, not overlapping any robot
+        self._x, self._y = self._random_position()
+        angle = random.uniform(0, 2 * math.pi)
+        self._vx = math.cos(angle) * self.SPEED
+        self._vy = math.sin(angle) * self.SPEED
 
         self._last_t = time.monotonic()
 
-        # Pre-compute a solid orange BGR colour that lies within LOWER/UPPER_ORANGE.
+        # Pre-compute a solid orange BGR colour within LOWER/UPPER_ORANGE.
         # HSV(15, 200, 220) is safely mid-range for both hue and saturation.
         _hsv = np.array([[[15, 200, 220]]], dtype=np.uint8)
         bgr  = cv2.cvtColor(_hsv, cv2.COLOR_HSV2BGR)[0, 0]
         self._orange_bgr = (int(bgr[0]), int(bgr[1]), int(bgr[2]))
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _all_robots(self):
+        """Return [(x, y)] for every simulated robot (own + obstacles)."""
+        state = _sim_state
+        if state is None:
+            return []
+        robots = []
+        r = state.get("robot")
+        if r:
+            robots.append((float(r[0]), float(r[1])))
+        robots += [(float(p[0]), float(p[1])) for p in state.get("obstacles", [])]
+        return robots
+
+    def _obstacle_robots(self):
+        """Return [(x, y)] for obstacle robots only (potential occluders)."""
+        state = _sim_state
+        if state is None:
+            return []
+        return [(float(p[0]), float(p[1])) for p in state.get("obstacles", [])]
+
+    def _random_position(self):
+        """Find a random field position not overlapping any robot."""
+        import random
+        robots  = self._all_robots()
+        min_sep = ROBOT_RADIUS + self.BALL_R + 0.05
+        for _ in range(500):
+            x = random.uniform(self.MARGIN, self.FIELD_W - self.MARGIN)
+            y = random.uniform(self.MARGIN, self.FIELD_H - self.MARGIN)
+            if all(math.hypot(x - rx, y - ry) >= min_sep for rx, ry in robots):
+                return x, y
+        return self.FIELD_W / 2.0, self.FIELD_H / 2.0   # fallback: field centre
+
+    def _is_occluded(self, cx, cy, bx, by):
+        """
+        Return True if any obstacle robot's body crosses the camera→ball segment.
+        Uses a 2-D ray–circle intersection against each obstacle.
+        """
+        dx, dy     = bx - cx, by - cy
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-12:
+            return False
+        for rx, ry in self._obstacle_robots():
+            # Scalar projection of occluder centre onto the segment, clamped to [0,1]
+            t = max(0.0, min(1.0,
+                ((rx - cx) * dx + (ry - cy) * dy) / seg_len_sq))
+            closest_dist = math.hypot(cx + t * dx - rx, cy + t * dy - ry)
+            if closest_dist < ROBOT_RADIUS:
+                return True
+        return False
+
+    # ── Physics + render ──────────────────────────────────────────────────────
 
     def render(self):
         """Advance physics and return a synthetic BGR frame."""
@@ -159,39 +212,73 @@ class _SimBall:
         dt  = now - self._last_t
         self._last_t = now
 
-        # Advance position
+        # ── Advance ball position ─────────────────────────────────────────────
         self._x += self._vx * dt
-        self._z += self._vz * dt
+        self._y += self._vy * dt
 
-        # Bounce off depth limits
-        if self._z < self.DIST_MIN_MM:
-            self._z  = self.DIST_MIN_MM
-            self._vz = abs(self._vz)
-        elif self._z > self.DIST_MAX_MM:
-            self._z  = self.DIST_MAX_MM
-            self._vz = -abs(self._vz)
+        # ── Bounce off field walls ────────────────────────────────────────────
+        if self._x < self.MARGIN:
+            self._x  = self.MARGIN;              self._vx =  abs(self._vx)
+        elif self._x > self.FIELD_W - self.MARGIN:
+            self._x  = self.FIELD_W - self.MARGIN; self._vx = -abs(self._vx)
+        if self._y < self.MARGIN:
+            self._y  = self.MARGIN;              self._vy =  abs(self._vy)
+        elif self._y > self.FIELD_H - self.MARGIN:
+            self._y  = self.FIELD_H - self.MARGIN; self._vy = -abs(self._vy)
 
-        # Bounce off horizontal FOV boundary (recomputed at current depth)
-        horiz_limit = math.tan(math.radians(FOV_DEG / 2.0)) * self._z * self.FOV_MARGIN
-        if self._x < -horiz_limit:
-            self._x  = -horiz_limit
-            self._vx = abs(self._vx)
-        elif self._x > horiz_limit:
-            self._x  = horiz_limit
-            self._vx = -abs(self._vx)
+        # ── Elastic bounce off every simulated robot ──────────────────────────
+        sep = ROBOT_RADIUS + self.BALL_R
+        for rx, ry in self._all_robots():
+            dx, dy = self._x - rx, self._y - ry
+            dist   = math.hypot(dx, dy)
+            if 0 < dist < sep:
+                nx, ny    = dx / dist, dy / dist
+                self._x   = rx + nx * sep           # push out of overlap
+                self._y   = ry + ny * sep
+                dot        = self._vx * nx + self._vy * ny
+                if dot < 0:                         # only reflect if approaching
+                    self._vx -= 2 * dot * nx
+                    self._vy -= 2 * dot * ny
 
-        # Project 3-D position onto the virtual sensor
-        px       = int(CENTER_X + (self._x / self._z) * self._focal_px)
-        radius_px = max(1, int((BALL_RADIUS_MM / self._z) * self._focal_px))
+        # ── Camera pose in global field frame ─────────────────────────────────
+        if _robot_pos is not None and _imu_pitch is not None:
+            heading_rad = math.radians(_imu_pitch)
+            cam_x = _robot_pos[0] + ROBOT_RADIUS * math.cos(heading_rad)
+            cam_y = _robot_pos[1] + ROBOT_RADIUS * math.sin(heading_rad)
+        else:
+            # Robot position not yet known — use field centre facing right
+            heading_rad = 0.0
+            cam_x, cam_y = self.FIELD_W / 2.0, self.FIELD_H / 2.0
 
-        # Render: black background with one filled orange circle
+        # ── Occlusion check ───────────────────────────────────────────────────
+        if self._is_occluded(cam_x, cam_y, self._x, self._y):
+            return np.zeros((RES_HEIGHT, RES_WIDTH, 3), dtype=np.uint8)
+
+        # ── Project ball into camera-local frame ──────────────────────────────
+        # Rotate global offset by -heading to get (right, forward) camera axes
+        dx, dy  = self._x - cam_x, self._y - cam_y
+        cos_h   = math.cos(heading_rad)
+        sin_h   = math.sin(heading_rad)
+        local_z =  dx * cos_h + dy * sin_h   # depth  (forward)
+        local_x = -dx * sin_h + dy * cos_h   # lateral (right = positive)
+
+        if local_z < 0.05:   # ball is behind or too close to the camera
+            return np.zeros((RES_HEIGHT, RES_WIDTH, 3), dtype=np.uint8)
+
+        local_z_mm = local_z * 1000.0
+        local_x_mm = local_x * 1000.0
+
+        px        = int(CENTER_X + (local_x_mm / local_z_mm) * self._focal_px)
+        radius_px = max(1, int((BALL_RADIUS_MM / local_z_mm) * self._focal_px))
+
+        # ── Render ────────────────────────────────────────────────────────────
         frame = np.zeros((RES_HEIGHT, RES_WIDTH, 3), dtype=np.uint8)
         cv2.circle(frame, (px, RES_HEIGHT // 2), radius_px, self._orange_bgr, -1)
         return frame
 
 
 def _on_broker_update(key, value):
-    global _robot_pos, _imu_pitch
+    global _robot_pos, _imu_pitch, _sim_state
     if value is None:
         return
     if key == "robot_position":
@@ -203,6 +290,11 @@ def _on_broker_update(key, value):
     elif key == "imu_pitch":
         try:
             _imu_pitch = float(value)
+        except Exception:
+            pass
+    elif key == "sim_state":
+        try:
+            _sim_state = json.loads(value)
         except Exception:
             pass
 
@@ -248,7 +340,13 @@ if __name__ == "__main__":
             _imu_pitch = float(val)
     except Exception:
         pass
-    mb.setcallback(["robot_position", "imu_pitch"], _on_broker_update)
+    try:
+        val = mb.get("sim_state")
+        if val is not None:
+            _sim_state = json.loads(val)
+    except Exception:
+        pass
+    mb.setcallback(["robot_position", "imu_pitch", "sim_state"], _on_broker_update)
     threading.Thread(target=mb.receiver_loop, daemon=True,
                      name="broker-receiver").start()
 
