@@ -13,7 +13,8 @@ PERF_NODES = [
     "node_pos_walls",
     "node_pos",
     "node_pos_robots",
-    "node_pos_predict",
+    "node_predict_robots",
+    "node_predict_ball",
     "node_vision",
     "node_twin_vis",
 ]
