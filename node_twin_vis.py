@@ -33,6 +33,7 @@ _position_history     = []
 _other_robots_history = []
 _ball_pos             = None  # {"x": float, "y": float} or None — detected position
 _ball_hidden_pos      = None  # {"x": float, "y": float} or None — extrapolated while hidden
+_ball_lost            = False # True when prediction is in FOV but ball not detected
 _ball_vx              = None  # m/s — fitted horizontal velocity
 _ball_vy              = None  # m/s — fitted vertical velocity
 _ball_history         = []    # [{"x", "y", "t"}, ...] from ball_history key
@@ -261,6 +262,9 @@ def _redraw():
     elif _ball_hidden_pos is not None:
         _art_ball.set_visible(False)
         _art_ball_hidden.set_center((_ball_hidden_pos["x"], _ball_hidden_pos["y"]))
+        _art_ball_hidden.set_edgecolor('red' if _ball_lost else 'darkorange')
+        _art_ball_hidden.set_facecolor((1.0, 0.0, 0.0, 0.25) if _ball_lost
+                                       else (1.0, 0.55, 0.0, 0.25))
         _art_ball_hidden.set_visible(True)
     else:
         _art_ball.set_visible(False)
@@ -368,7 +372,7 @@ def on_update(key, value):
     global _lidar, _detection_origin, _detection_heading, _imu_pitch
     global _robot_pos, _other_robots, _walls
     global _position_history, _other_robots_history
-    global _ball_pos, _ball_hidden_pos, _ball_vx, _ball_vy, _ball_history
+    global _ball_pos, _ball_hidden_pos, _ball_lost, _ball_vx, _ball_vy, _ball_history
     global _sim_ball_pos, _sim_state
 
     if value is None:
@@ -415,6 +419,7 @@ def on_update(key, value):
                 payload           = json.loads(value)
                 _ball_pos        = payload.get("global_pos")
                 _ball_hidden_pos = payload.get("hidden_pos")
+                _ball_lost       = bool(payload.get("ball_lost", False))
                 _ball_vx         = payload.get("vx")
                 _ball_vy         = payload.get("vy")
                 _sim_ball_pos    = payload.get("sim_pos")
