@@ -70,33 +70,42 @@ def on_frame(data):
 
     Steps:
       1. Publish raw ally fields to the broker under the ally_ prefix.
-      2. Identify the ally in our other_robots list by proximity to
-         main_robot_pos; update its position to the received value and tag it.
-      3. Among other_pos_1/2/3, find and discard the entry closest to this
-         system's own robot_position (the ally is observing us).
-      4. Fuse the remaining two ally observations with our other_robots via
-         nearest-neighbour matching and confidence-weighted averaging.
-      5. Fuse ball positions (confidence-weighted, or direct if no local value).
-      6. Publish updated other_robots and ball_pos.
+      2. Identify the ally in our other_robots list (detected or predicted) by
+         proximity to main_robot_pos.
+         - Detected match  → update position to received value, tag as ally.
+         - Predicted match → replace prediction with received position, tag as ally.
+      3. Among other_pos_1/2/3, discard the entry closest to this system's own
+         robot_position (the ally is observing us).
+      4. For each remaining ally detection, match to nearest unmatched robot
+         (detected or predicted):
+         - Detected match  → confidence-weighted position fusion.
+         - Predicted match → replace prediction with ally's observation.
+      5. For each ally prediction (other_pred_*), match to nearest unmatched robot:
+         - Detected match  → discard ally prediction (detection wins, no change).
+         - Predicted match → update our prediction to the mean of both predictions.
+      6. Publish updated other_robots.
+      7. Fuse ball positions (confidence-weighted, or direct if no local value).
     """
     with _perf.measure("frame"):
         # ── Step 1: Publish raw ally fields ───────────────────────────────────
-        for key in ("main_robot_pos", "other_pos_1", "other_pos_2",
-                    "other_pos_3", "ball_pos"):
+        for key in ("main_robot_pos", "other_pos_1", "other_pos_2", "other_pos_3",
+                    "ball_pos", "other_pred_1", "other_pred_2", "other_pred_3"):
             if key in data:
                 mb.set(f"ally_{key}", json.dumps(data[key]))
 
         ally_main   = data.get("main_robot_pos")
         ally_others = [data.get(f"other_pos_{i}") for i in range(1, 4)]
+        ally_preds  = [data.get(f"other_pred_{i}") for i in range(1, 4)]
         ally_ball   = data.get("ball_pos")
 
         if _other_robots is None:
             return  # not enough broker state to fuse yet
 
-        robots = [dict(r) for r in _other_robots.get("robots", [])]
-        origin = _other_robots.get("origin")
+        robots  = [dict(r) for r in _other_robots.get("robots", [])]
+        origin  = _other_robots.get("origin")
+        matched = set()  # robot indices consumed across all steps
 
-        # ── Step 2: Identify ally robot in our other_robots list ──────────────
+        # ── Step 2: Identify ally robot (detected or predicted) ───────────────
         ally_idx      = None
         ally_main_pos = _xy(ally_main)
         if ally_main_pos is not None and robots:
@@ -104,10 +113,18 @@ def on_frame(data):
                 range(len(robots)),
                 key=lambda i: _dist((robots[i]["x"], robots[i]["y"]), ally_main_pos),
             )
-            # The ally knows its own position most accurately — use directly.
-            robots[ally_idx]["x"]    = ally_main_pos[0]
-            robots[ally_idx]["y"]    = ally_main_pos[1]
-            robots[ally_idx]["ally"] = True
+            matched.add(ally_idx)
+            if robots[ally_idx].get("method") == "predicted":
+                # Prediction confirmed — replace with ally's self-reported position.
+                robots[ally_idx].update({
+                    "x": ally_main_pos[0], "y": ally_main_pos[1],
+                    "method": "cluster", "ally": True,
+                })
+            else:
+                # Detected — update to ally's self-reported position directly.
+                robots[ally_idx]["x"]    = ally_main_pos[0]
+                robots[ally_idx]["y"]    = ally_main_pos[1]
+                robots[ally_idx]["ally"] = True
             mb.set("ally_id", str(robots[ally_idx].get("id", ally_idx)))
 
         # ── Step 3: Discard the ally's observation that matches our position ──
@@ -123,31 +140,58 @@ def on_frame(data):
                                key=lambda t: _dist(t[1], _robot_pos))[0]
                 remaining_ally[self_idx] = None
 
-        # ── Step 4: Fuse remaining ally observations with our other_robots ────
-        sys_indices = [i for i in range(len(robots)) if i != ally_idx]
-        ally_valid  = [
+        # ── Step 4: Fuse ally detections (detected or predicted match) ────────
+        sys_indices    = [i for i in range(len(robots)) if i != ally_idx]
+        ally_det_valid = [
             (_xy(p), _conf(p))
             for p in remaining_ally
             if p is not None and _xy(p) is not None
         ]
 
-        matched = set()
-        for ally_pos, ally_c in ally_valid:
+        for ally_pos, ally_c in ally_det_valid:
             unmatched = [i for i in sys_indices if i not in matched]
             if not unmatched:
                 break
-            best    = min(unmatched,
-                          key=lambda i: _dist((robots[i]["x"], robots[i]["y"]), ally_pos))
+            best = min(unmatched,
+                       key=lambda i: _dist((robots[i]["x"], robots[i]["y"]), ally_pos))
             matched.add(best)
-            sys_pos = (robots[best]["x"], robots[best]["y"])
-            sys_c   = float(robots[best].get("confidence", 1.0))
-            fx, fy  = _fuse(sys_pos, sys_c, ally_pos, ally_c)
-            robots[best]["x"] = fx
-            robots[best]["y"] = fy
+            if robots[best].get("method") == "predicted":
+                # Replace stale prediction with ally's fresher observation.
+                robots[best]["x"]      = ally_pos[0]
+                robots[best]["y"]      = ally_pos[1]
+                robots[best]["method"] = "cluster"
+            else:
+                # Both detected — confidence-weighted fusion.
+                sys_pos = (robots[best]["x"], robots[best]["y"])
+                sys_c   = float(robots[best].get("confidence", 1.0))
+                fx, fy  = _fuse(sys_pos, sys_c, ally_pos, ally_c)
+                robots[best]["x"] = fx
+                robots[best]["y"] = fy
 
+        # ── Step 5: Match ally predictions ────────────────────────────────────
+        ally_pred_valid = [
+            (_xy(p), _conf(p))
+            for p in ally_preds
+            if p is not None and _xy(p) is not None
+        ]
+
+        for ally_pred_pos, _ in ally_pred_valid:
+            unmatched = [i for i in sys_indices if i not in matched]
+            if not unmatched:
+                break
+            best = min(unmatched,
+                       key=lambda i: _dist((robots[i]["x"], robots[i]["y"]), ally_pred_pos))
+            matched.add(best)
+            if robots[best].get("method") == "predicted":
+                # Both predicted — update ours to the mean.
+                robots[best]["x"] = round((robots[best]["x"] + ally_pred_pos[0]) / 2, 3)
+                robots[best]["y"] = round((robots[best]["y"] + ally_pred_pos[1]) / 2, 3)
+            # else: our detection beats ally's prediction — no change.
+
+        # ── Step 6: Publish updated other_robots ──────────────────────────────
         mb.set("other_robots", json.dumps({"origin": origin, "robots": robots}))
 
-        # ── Step 5: Fuse ball position ─────────────────────────────────────────
+        # ── Step 7: Fuse ball position ─────────────────────────────────────────
         if ally_ball is not None:
             ally_ball_pos  = _xy(ally_ball)
             ally_ball_conf = _conf(ally_ball)
