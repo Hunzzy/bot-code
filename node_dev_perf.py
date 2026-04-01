@@ -26,6 +26,8 @@ PERF_NODES = [
     "node_twin_vis",
     "node_time",
     "node_bus_display",
+    "node_time",
+    "node_bus_display",
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 
