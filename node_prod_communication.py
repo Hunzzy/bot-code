@@ -252,6 +252,8 @@ def on_update(key, value):
     if key == "other_robots":
         try:
             _other_robots = json.loads(value)
+            if _ally_id is not None:
+                mb.set("ally_id", str(_ally_id))
         except (json.JSONDecodeError, TypeError):
             pass
 

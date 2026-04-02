@@ -242,7 +242,7 @@ def _redraw():
             ox, oy    = r[0], r[1]
             method    = str(r[2]) if len(r) > 2 else ""
             rid       = int(r[3]) if len(r) > 3 else 0
-            is_ally   = (bool(r[4]) if len(r) > 4 else False) or (_ally_id is not None and rid == _ally_id)
+            is_ally   = _ally_id is not None and rid == _ally_id
             predicted = method == "predicted"
             c_solid   = _ALLY_BLUE if is_ally else (0.90, 0.22, 0.18)
             c_face    = c_solid + (0.15 if predicted else 0.3,)
