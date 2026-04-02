@@ -39,6 +39,8 @@ _ball_vy              = None  # m/s — fitted vertical velocity
 _ball_history         = []    # [{"x", "y", "t"}, ...] from ball_history key
 _sim_ball_pos         = None  # {"x": float, "y": float} or None — true sim position
 _sim_state            = None  # {"robot": [x,y], "obstacles": [[x,y],...]} from sim_state key
+_ally_id              = None  # persistent ally robot ID from cooperation node
+_ally_pos_raw         = {}    # "ally_main_robot_pos" / "ally_other_pos_N" → {"x","y"}
 
 _state_lock   = threading.Lock()
 _needs_redraw = threading.Event()
@@ -98,7 +100,7 @@ for _ in range(_MAX_VIS_ROBOTS):
 
 # Heading arrow
 _art_arrow = FancyArrowPatch((0, 0), (0.1, 0),
-    arrowstyle='->', color='#555555', lw=2.0, mutation_scale=15,
+    arrowstyle='->', color='#2a7a2a', lw=2.0, mutation_scale=15,
     zorder=8, animated=True, visible=False)
 ax.add_patch(_art_arrow)
 
@@ -154,6 +156,17 @@ def _sim_cross(color):
 _art_sim_ball = _sim_cross('darkorange')
 _art_sim_self = _sim_cross('#2a7a2a')
 _art_sim_obs = [_sim_cross((0.90, 0.22, 0.18)) for _ in range(3)]
+
+# Ally detected positions — raw reports from the cooperation node
+_ALLY_BLUE = (0.13, 0.53, 0.90)
+_MAX_ALLY_OTHERS = 3
+def _ally_marker(marker):
+    (art,) = ax.plot([], [], marker=marker, markersize=10, markeredgewidth=2,
+                     color=_ALLY_BLUE, ls='none', zorder=9, animated=True)
+    return art
+
+_art_ally_main = _ally_marker('D')
+_art_ally_det  = [_ally_marker('x') for _ in range(_MAX_ALLY_OTHERS)]
 
 # Status text (inside axes, top-left corner)
 _art_status = ax.text(0.01, 0.99, '', transform=ax.transAxes,
@@ -228,9 +241,9 @@ def _redraw():
             ox, oy    = r[0], r[1]
             method    = str(r[2]) if len(r) > 2 else ""
             rid       = int(r[3]) if len(r) > 3 else 0
-            is_ally   = r[4] if len(r) > 4 else False
+            is_ally   = (_ally_id is not None and rid == _ally_id)
             predicted = method == "predicted"
-            c_solid   = (0.13, 0.53, 0.90) if is_ally else (0.90, 0.22, 0.18)
+            c_solid   = _ALLY_BLUE if is_ally else (0.90, 0.22, 0.18)
             c_face    = c_solid + (0.15 if predicted else 0.3,)
             circ.set_center((ox, oy))
             circ.set_edgecolor(c_solid)
@@ -312,6 +325,13 @@ def _redraw():
         for art in _art_sim_obs:
             art.set_data([], [])
 
+    # ── Ally detected positions ───────────────────────────────────────────────
+    p = _ally_pos_raw.get("ally_main_robot_pos")
+    _art_ally_main.set_data([p["x"]], [p["y"]]) if p else _art_ally_main.set_data([], [])
+    for i, art in enumerate(_art_ally_det):
+        p = _ally_pos_raw.get(f"ally_other_pos_{i + 1}")
+        art.set_data([p["x"]], [p["y"]]) if p else art.set_data([], [])
+
     # ── Walls ─────────────────────────────────────────────────────────────────
     _update_wall_lines(_walls, _art_walls, origin)
 
@@ -320,7 +340,7 @@ def _redraw():
         arr   = np.array([(p["x"], p["y"], p["t"]) for p in _position_history])
         t0    = arr[0, 2];  rng = max(arr[-1, 2] - t0, 1e-9)
         alpha = 0.05 + 0.7 * (arr[:, 2] - t0) / rng
-        rgba  = np.column_stack([np.full((len(arr), 3), [0.4, 0.4, 0.4]), alpha])
+        rgba  = np.column_stack([np.full((len(arr), 3), [0.17, 0.48, 0.17]), alpha])
         _art_pos_hist.set_offsets(arr[:, :2])
         _art_pos_hist.set_facecolors(rgba)
     else:
@@ -334,7 +354,8 @@ def _redraw():
         for snap in _other_robots_history:
             alpha = 0.05 + 0.6 * (snap["t"] - t0) / rng
             for r in snap["robots"]:
-                c = _TAB10[(int(r.get("id", 0)) - 1) % 10]
+                rid = int(r.get("id", 0))
+                c   = _ALLY_BLUE if (_ally_id is not None and rid == _ally_id) else (0.90, 0.22, 0.18)
                 pts.append((r["x"], r["y"]))
                 rgba.append(c + (alpha,))
         if pts:
@@ -360,6 +381,7 @@ def _redraw():
         _art_arrow,
         _art_ball, _art_ball_hidden, _art_ball_hist, _art_ball_arrow,
         _art_sim_ball, _art_sim_self, *_art_sim_obs,
+        _art_ally_main, *_art_ally_det,
         *_art_walls,
         _art_pos_hist, _art_bot_hist,
         _art_status,
@@ -374,7 +396,7 @@ def on_update(key, value):
     global _robot_pos, _other_robots, _walls
     global _position_history, _other_robots_history
     global _ball_pos, _ball_hidden_pos, _ball_lost, _ball_vx, _ball_vy, _ball_history
-    global _sim_ball_pos, _sim_state
+    global _sim_ball_pos, _sim_state, _ally_id, _ally_pos_raw
 
     if value is None:
         return
@@ -432,6 +454,20 @@ def on_update(key, value):
             elif key == "sim_state":
                 _sim_state = json.loads(value)
 
+            elif key == "ally_id":
+                try:
+                    _ally_id = int(value) if value and value.strip() else None
+                except (ValueError, TypeError):
+                    _ally_id = None
+
+            elif key in ("ally_main_robot_pos", "ally_other_pos_1",
+                         "ally_other_pos_2", "ally_other_pos_3"):
+                try:
+                    p = json.loads(value)
+                    _ally_pos_raw[key] = {"x": float(p["x"]), "y": float(p["y"])}
+                except Exception:
+                    _ally_pos_raw.pop(key, None)
+
     except Exception as e:
         print(f"[VIS] parse error on {key!r}: {e}")
         return
@@ -452,6 +488,7 @@ if __name__ == "__main__":
         "ball":                 lambda v: json.loads(v).get("global_pos"),
         "ball_history":         lambda v: json.loads(v),
         "sim_state":            lambda v: json.loads(v),
+        "ally_id":              lambda v: int(v) if v and v.strip() else None,
     }
     _TARGETS = {
         "imu_pitch":            "_imu_pitch",
@@ -464,6 +501,7 @@ if __name__ == "__main__":
         "ball":                 "_ball_pos",
         "ball_history":         "_ball_history",
         "sim_state":            "_sim_state",
+        "ally_id":              "_ally_id",
     }
     for key, parse in _SEEDS.items():
         try:
@@ -477,7 +515,9 @@ if __name__ == "__main__":
     fig.canvas.draw()   # draws static background + fires draw_event → caches _bg
     _redraw()           # first blit pass
 
-    mb.setcallback(list(_SEEDS.keys()), on_update)
+    _ally_keys = ["ally_main_robot_pos", "ally_other_pos_1",
+                  "ally_other_pos_2", "ally_other_pos_3"]
+    mb.setcallback(list(_SEEDS.keys()) + _ally_keys, on_update)
     threading.Thread(target=mb.receiver_loop, daemon=True,
                      name="broker-receiver").start()
 

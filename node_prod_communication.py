@@ -32,6 +32,7 @@ _robot_pos    = None  # (x, y) metres — this system's own position
 _ball_pos     = None  # {"x": ..., "y": ..., "confidence": ...} or None
 _sim_state    = None   # {"robot": [x,y], "obstacles": [[x,y],...]} from sim_state
 _ball_sim_pos = None   # {"x": float, "y": float} — true sim ball position
+_ally_id      = None   # persistent ally robot ID once identified
 
 
 # ── Geometry helpers ──────────────────────────────────────────────────────────
@@ -81,7 +82,7 @@ def _process_frame(data):
     Steps:
       1. Publish raw ally fields to the broker under the ally_ prefix.
       2. Identify the ally in our other_robots list (detected or predicted) by
-         proximity to main_robot_pos.
+         known ID first, then proximity to main_robot_pos as fallback.
          - Detected match  → update position to received value, tag as ally.
          - Predicted match → replace prediction with received position, tag as ally.
       3. Among other_pos_1/2/3, discard the entry closest to this system's own
@@ -96,6 +97,7 @@ def _process_frame(data):
       6. Publish updated other_robots.
       7. Fuse ball positions (confidence-weighted, or direct if no local value).
     """
+    global _ally_id
     # ── Step 1: Publish raw ally fields ───────────────────────────────────
     for key in ("main_robot_pos", "other_pos_1", "other_pos_2", "other_pos_3",
                 "ball_pos", "other_pred_1", "other_pred_2", "other_pred_3"):
@@ -118,10 +120,18 @@ def _process_frame(data):
     ally_idx      = None
     ally_main_pos = _xy(ally_main)
     if ally_main_pos is not None and robots:
-        ally_idx = min(
-            range(len(robots)),
-            key=lambda i: _dist((robots[i]["x"], robots[i]["y"]), ally_main_pos),
-        )
+        # Prefer match by known persistent ID; fall back to proximity.
+        if _ally_id is not None:
+            ally_idx = next(
+                (i for i, r in enumerate(robots) if r.get("id") == _ally_id),
+                None,
+            )
+        if ally_idx is None:
+            ally_idx = min(
+                range(len(robots)),
+                key=lambda i: _dist((robots[i]["x"], robots[i]["y"]), ally_main_pos),
+            )
+        _ally_id = robots[ally_idx].get("id", ally_idx)
         matched.add(ally_idx)
         if robots[ally_idx].get("method") == "predicted":
             # Prediction confirmed — replace with ally's self-reported position.
@@ -134,7 +144,7 @@ def _process_frame(data):
             robots[ally_idx]["x"]    = ally_main_pos[0]
             robots[ally_idx]["y"]    = ally_main_pos[1]
             robots[ally_idx]["ally"] = True
-        mb.set("ally_id", str(robots[ally_idx].get("id", ally_idx)))
+        mb.set("ally_id", str(_ally_id))
 
     # ── Step 3: Discard the ally's observation that matches our position ──
     remaining_ally = list(ally_others)
