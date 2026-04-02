@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "robus-core"))
 import json
 import math
 import threading
+import time
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 from utils.perf_monitor import PerfMonitor
 from utils.cooperation_reader import SerialCooperationReader, SimCooperationReader
@@ -113,17 +114,13 @@ def _compute_corrections(ally_main, ally_others, ally_ball):
         ally_idx      = None
         ally_main_pos = _xy(ally_main)
         if ally_main_pos is not None and robots:
-            if _ally_id is not None:
-                ally_idx = next(
-                    (i for i, r in enumerate(robots) if r.get("id") == _ally_id),
-                    None,
-                )
+            # Identify ally only by position
             if ally_idx is None:
                 ally_idx = min(
                     range(len(robots)),
                     key=lambda i: _dist((robots[i]["x"], robots[i]["y"]), ally_main_pos),
                 )
-            _ally_id = robots[ally_idx].get("id", ally_idx)
+            _ally_id = robots[ally_idx].get("id")
             mb.set("ally_id", str(_ally_id))
             corrections.append({
                 "id":   _ally_id,
