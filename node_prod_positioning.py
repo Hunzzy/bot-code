@@ -31,8 +31,9 @@ VEL_MIN_DT         = 0.05
 VEL_HISTORY_N      = 10
 VEL_HISTORY_MIN    = 3
 MAX_ROBOT_SPEED    = 2.0
-_MAX_PRED_DT       = 0.5
-MAX_CORRECTION_AGE = 0.5   # seconds — ignore ally corrections older than this
+_MAX_PRED_DT        = 0.5
+MAX_CORRECTION_AGE  = 0.5   # seconds — ignore ally data older than this
+MAX_ALLY_MATCH_DIST = 0.30  # metres  — max distance to match an ally observation
 
 # ── Time / history ────────────────────────────────────────────────────────────
 TIME_PUBLISH_HZ   = 10
@@ -55,11 +56,12 @@ _lidar     = {}     # angle_deg (int) → dist_mm (int)
 _lidar_walls = []   # [{"gradient": 0|None, "offset": float}, ...]
 
 # ── Robot detection & tracking state ─────────────────────────────────────────
-_robot_pos          = None  # (x, y) metres — updated after each position computation
-_tracked            = {}    # id → {"x","y","vx","vy","t","history"}
-_next_id            = 1
-_ally_corrections   = {}    # id → {dx, dy, conf}
-_ally_corrections_t = 0.0   # monotonic time of last ally_corrections update
+_robot_pos   = None   # (x, y) metres — updated after each position computation
+_tracked     = {}     # id → {"x","y","vx","vy","t","history"}
+_next_id     = 1
+_ally_data   = None   # latest ally_data payload from communication node
+_ally_data_t = 0.0    # monotonic time of last ally_data update
+_ally_id     = None   # persistent ally robot ID
 
 # ── Time node state ───────────────────────────────────────────────────────────
 _time_start     = time.monotonic()
@@ -359,24 +361,179 @@ def _detect_and_track_robots(rel_pts, robot_pos_arr, fa_rad, now):
     return robots, origin
 
 
+# ── Ally observation integration ─────────────────────────────────────────────
+
+def _apply_ally_updates(robots, now):
+    """
+    Integrate ally observations into the freshly-detected robot list and the
+    tracked-but-undetected (prediction) entries in _tracked.
+
+    *robots* is the mutable list from _detect_and_track_robots; entries may
+    be updated in-place and new entries appended for predictions promoted by
+    ally observations.
+
+    Matching order:
+      1. Ally main pos  → detection (by ID or proximity) or prediction
+      2. Self pos       → find among ally's other_pos and ignore it
+      3. Ally other_pos → remaining detections, then predictions
+      4. Ally other_pred→ if matches detection: discard; if matches our
+                          prediction: average the two
+    """
+    global _ally_id
+
+    # Always re-publish so twin_vis stays up-to-date even when data is stale
+    if _ally_id is not None:
+        mb.set("ally_id", str(_ally_id))
+
+    if _ally_data is None or (now - _ally_data_t) >= MAX_CORRECTION_AGE:
+        return
+
+    detected_ids = {r["id"] for r in robots if "id" in r}
+    pred_ids     = set(_tracked.keys()) - detected_ids
+
+    def _apos(d):
+        if d is None:
+            return None
+        try:
+            return float(d["x"]), float(d["y"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _aconf(d):
+        if d is None:
+            return 1.0
+        try:
+            return max(float(d.get("confidence", 1.0)), 1e-9)
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _closest(target, candidates):
+        best_d, best = float("inf"), None
+        tx, ty = target
+        for c in candidates:
+            d = math.hypot(c["x"] - tx, c["y"] - ty)
+            if d < best_d and d < MAX_ALLY_MATCH_DIST:
+                best_d, best = d, c
+        return best
+
+    def _pred_list(exclude=()):
+        return [{"id": tid, "x": tr["x"], "y": tr["y"]}
+                for tid, tr in _tracked.items()
+                if tid in pred_ids and tid not in exclude]
+
+    def _promote(tid, apos, aconf):
+        """Move a prediction slot into the detections list at the ally position."""
+        pred_ids.discard(tid)
+        tr = _tracked[tid]
+        tr["x"], tr["y"], tr["t"] = apos[0], apos[1], now
+        robots.append({
+            "id":  tid,
+            "x":   round(apos[0], 3), "y": round(apos[1], 3),
+            "confidence": aconf, "method": "ally",
+            "vx":  round(tr.get("vx", 0.0), 3),
+            "vy":  round(tr.get("vy", 0.0), 3),
+        })
+
+    matched = set()   # robot IDs already updated this call
+
+    # ── 1. Ally main position ─────────────────────────────────────────────────
+    main_d    = _ally_data.get("main_pos")
+    main_pos  = _apos(main_d)
+    main_conf = _aconf(main_d)
+
+    if main_pos is not None:
+        match = None
+        if _ally_id is not None:
+            match = next((r for r in robots if r.get("id") == _ally_id), None)
+        if match is None:
+            match = _closest(main_pos, [r for r in robots if r.get("id") not in matched])
+
+        if match is not None:
+            rid = match["id"]
+            _ally_id = rid
+            matched.add(rid)
+            sconf = float(match.get("confidence", 1.0))
+            w = main_conf / (main_conf + sconf)
+            match["x"] = round(match["x"] + w * (main_pos[0] - match["x"]), 3)
+            match["y"] = round(match["y"] + w * (main_pos[1] - match["y"]), 3)
+            mb.set("ally_id", str(_ally_id))
+        else:
+            pm = _closest(main_pos, _pred_list(matched))
+            if pm is not None:
+                _ally_id = pm["id"]
+                matched.add(_ally_id)
+                _promote(_ally_id, main_pos, main_conf)
+                mb.set("ally_id", str(_ally_id))
+
+    # ── 2. Find self among ally's other_pos, then match remaining ─────────────
+    other_pos = list(_ally_data.get("other_pos", []))
+
+    if _robot_pos is not None:
+        best_d, self_idx = float("inf"), None
+        for i, op in enumerate(other_pos):
+            p = _apos(op)
+            if p is None:
+                continue
+            d = math.hypot(p[0] - _robot_pos[0], p[1] - _robot_pos[1])
+            if d < best_d:
+                best_d, self_idx = d, i
+        if self_idx is not None:
+            other_pos[self_idx] = None
+
+    for op in other_pos:
+        apos  = _apos(op)
+        if apos is None:
+            continue
+        aconf = _aconf(op)
+
+        dm = _closest(apos, [r for r in robots if r.get("id") not in matched])
+        if dm is not None:
+            rid = dm["id"]
+            matched.add(rid)
+            sconf = float(dm.get("confidence", 1.0))
+            w = aconf / (aconf + sconf)
+            dm["x"] = round(dm["x"] + w * (apos[0] - dm["x"]), 3)
+            dm["y"] = round(dm["y"] + w * (apos[1] - dm["y"]), 3)
+            continue
+
+        pm = _closest(apos, _pred_list(matched))
+        if pm is not None:
+            matched.add(pm["id"])
+            _promote(pm["id"], apos, aconf)
+
+    # ── 3. Ally's other_pred ──────────────────────────────────────────────────
+    for ap in _ally_data.get("other_pred", []):
+        apos = _apos(ap)
+        if apos is None:
+            continue
+
+        # Matched to our detection → ally prediction is redundant, skip
+        if _closest(apos, robots) is not None:
+            continue
+
+        # Matched to our prediction → average the two
+        pm = _closest(apos, _pred_list())
+        if pm is not None:
+            tid = pm["id"]
+            tr  = _tracked[tid]
+            tr["x"] = round((tr["x"] + apos[0]) / 2, 3)
+            tr["y"] = round((tr["y"] + apos[1]) / 2, 3)
+
+
 # ── Broker callback ───────────────────────────────────────────────────────────
 
 def on_update(key, value):
     global _imu_pitch, _lidar, _lidar_walls, _robot_pos
     global _robots_last_t, _ball_last_t
-    global _ally_corrections, _ally_corrections_t
+    global _ally_data, _ally_data_t
 
     if value is None:
         return
 
-    if key == "ally_corrections":
+    if key == "ally_data":
         try:
-            payload = json.loads(value)
-            _ally_corrections = {
-                int(c["id"]): {"dx": float(c["dx"]), "dy": float(c["dy"]), "conf": float(c["conf"])}
-                for c in payload.get("corrections", []) if c.get("id") is not None
-            }
-            _ally_corrections_t = float(payload.get("t", 0.0))
+            _ally_data   = json.loads(value)
+            _ally_data_t = time.monotonic()
         except Exception:
             pass
         return
@@ -425,14 +582,7 @@ def on_update(key, value):
                 robots, origin = _detect_and_track_robots(rel_pts, robot_pos_arr,
                                                           fa_rad, now)
                 if robots is not None:
-                    if _ally_corrections and (now - _ally_corrections_t) < MAX_CORRECTION_AGE:
-                        for robot in robots:
-                            rid = robot.get("id")
-                            if rid in _ally_corrections:
-                                c = _ally_corrections[rid]
-                                w = c["conf"] / (c["conf"] + float(robot.get("confidence", 1.0)))
-                                robot["x"] = round(robot["x"] + w * c["dx"], 3)
-                                robot["y"] = round(robot["y"] + w * c["dy"], 3)
+                    _apply_ally_updates(robots, now)
                     mb.set("other_robots_detected",
                            json.dumps({"origin": origin, "robots": robots, "t": now}))
         return
@@ -488,7 +638,7 @@ if __name__ == "__main__":
     threading.Thread(target=_time_loop, daemon=True, name="time-publisher").start()
 
     # robot_position is produced internally — no subscription needed
-    mb.setcallback(["lidar", "imu_pitch", "other_robots", "ball", "ally_corrections"], on_update)
+    mb.setcallback(["lidar", "imu_pitch", "other_robots", "ball", "ally_data"], on_update)
     print("[POSITIONING] Starting combined positioning node...")
     try:
         mb.receiver_loop()
