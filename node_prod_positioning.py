@@ -352,6 +352,8 @@ def _detect_and_track_robots(rel_pts, robot_pos_arr, fa_rad, now):
             "confidence": float(len(cluster)),
         })
 
+        mb.set("raw_robots", json.dumps(robots))
+
     robots.sort(key=lambda r: r["confidence"], reverse=True)
     robots = _filter_overlapping(robots)[:MAX_ROBOTS]
     robots = _match_and_track(robots, now)
@@ -443,11 +445,8 @@ def _apply_ally_updates(robots, now):
         main_conf = _aconf(main_d)
 
         if main_pos is not None:
-            match = None
-            if _ally_id is not None:
-                match = next((r for r in robots if r.get("id") == _ally_id), None)
-            if match is None:
-                match = _closest(main_pos, [r for r in robots if r.get("id") not in matched])
+            # Determine which robot this ally position matches (every update)
+            match = _closest(main_pos, [r for r in robots if r.get("id") not in matched])
 
             if match is not None:
                 rid = match["id"]
@@ -455,8 +454,9 @@ def _apply_ally_updates(robots, now):
                 matched.add(rid)
                 sconf = float(match.get("confidence", 1.0))
                 w = main_conf / (main_conf + sconf)
-                match["x"] = round(match["x"] + w * (main_pos[0] - match["x"]), 3)
-                match["y"] = round(match["y"] + w * (main_pos[1] - match["y"]), 3)
+                # Ally position set to its determination (should be more accurate than our prediction)
+                match["x"] = main_pos[0]
+                match["y"] = main_pos[1]
                 mb.set("ally_id", str(_ally_id))
             else:
                 pm = _closest(main_pos, _pred_list(matched))

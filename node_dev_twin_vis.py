@@ -4,7 +4,8 @@ import time
 import threading
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch, Patch
 import numpy as np
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 from utils.perf_monitor import PerfMonitor
@@ -41,6 +42,8 @@ _sim_ball_pos         = None  # {"x": float, "y": float} or None — true sim po
 _sim_state            = None  # {"robot": [x,y], "obstacles": [[x,y],...]} from sim_state key
 _ally_id              = None  # persistent ally robot ID from cooperation node
 _ally_pos_raw         = {}    # "ally_main_robot_pos" / "ally_other_pos_N" / "ally_ball_pos" → {"x","y"}
+_raw_robots           = None  # list of raw robot positions from positioning (without ally)
+_ball_raw             = None  # raw ball position from detection (without ally)
 
 _state_lock   = threading.Lock()
 _needs_redraw = threading.Event()
@@ -174,6 +177,50 @@ _art_status = ax.text(0.01, 0.99, '', transform=ax.transAxes,
     ha='left', va='top', fontsize=8, animated=True, zorder=15,
     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
               alpha=0.75, edgecolor='none'))
+
+# ── Legend ────────────────────────────────────────────────────────────────────
+_legend_handles = [
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='#aaddaa',
+           markeredgecolor='#2a7a2a', markersize=8, label='Own robot'),
+    Line2D([0], [0], color='#2a7a2a', lw=2, label='Heading'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='#aaddaa',
+           markeredgecolor=None, markersize=3, label='Own history'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor=_ALLY_BLUE,
+           markeredgecolor=_ALLY_BLUE, markersize=8, label='Ally robot'),
+    Line2D([0], [0], marker='d', color='w', markerfacecolor=_ALLY_BLUE,
+           markeredgecolor=_ALLY_BLUE, markersize=4, label='Ally position'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor=_ALLY_BLUE,
+           markeredgecolor=None, markersize=3, label='Ally history'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
+           markeredgecolor='darkred', markersize=8, label='Enemy robot'),
+    Line2D([0], [0], marker='+', color='red', linestyle='None',
+           markersize=4, label='Own detections'),
+    Line2D([0], [0], marker='x', color=_ALLY_BLUE, linestyle='None',
+           markersize=4, label='Ally detections'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
+           markeredgecolor=None, markersize=3, label='Enemy history'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='orange',
+           markeredgecolor='darkorange', markersize=4, label='Ball'),
+    Line2D([0], [0], color='orange', lw=1, label='Ball velocity'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor=(1.0, 0.55, 0.0, 0.25),
+           markeredgecolor='darkorange', linestyle='--', markersize=4,
+           label='Ball (extrapolated prediction)'),
+    Line2D([0], [0], marker='+', color='darkorange', linestyle='None',
+           markersize=4, label='Own ball detection)'),
+    Line2D([0], [0], marker='*', color=_ALLY_BLUE, linestyle='None',
+           markersize=4, label='Ally ball detection)'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='darkorange',
+           markeredgecolor=None, markersize=3, label='Ball history'),
+    Line2D([0], [0], color='steelblue', lw=1.5, linestyle='--',
+           label='Walls'),
+    Line2D([0], [0], marker='.', color='black', linestyle='None',
+           markersize=4, label='Lidar'),
+]
+
+ax.legend(handles=_legend_handles,
+          loc='upper left',
+          bbox_to_anchor=(1.02, 1.0),
+          borderaxespad=0.)
 
 # ── Background cache ──────────────────────────────────────────────────────────
 _bg = None
@@ -309,21 +356,21 @@ def _redraw():
     else:
         _art_ball_arrow.set_visible(False)
 
-    # ── Sim ground-truth crosses ───────────────────────────────────────────────
-    if _sim_ball_pos is not None:
-        _art_sim_ball.set_data([_sim_ball_pos["x"]], [_sim_ball_pos["y"]])
+    # ── Raw detection crosses ─────────────────────────────────────────────────
+    if _ball_raw is not None and _ball_raw["global_pos"] is not None:
+        _art_sim_ball.set_data([_ball_raw["global_pos"]["x"]], [_ball_raw["global_pos"]["y"]])
     else:
         _art_sim_ball.set_data([], [])
 
-    if _sim_state is not None:
-        r   = _sim_state.get("robot")
-        obs = _sim_state.get("obstacles", [])
-        _art_sim_self.set_data([float(r[0])], [float(r[1])]) if r else _art_sim_self.set_data([], [])
+    if _raw_robots is not None:
         for i, art in enumerate(_art_sim_obs):
-            art.set_data([float(obs[i][0])], [float(obs[i][1])]) if i < len(obs) else art.set_data([], [])
+            if i < len(_raw_robots):
+                robot = _raw_robots[i]
+                art.set_data([robot["x"]], [robot["y"]])
+            else:
+                art.set_data([], [])
     else:
-        _art_sim_self.set_data([], [])
-        for art in _art_sim_obs:
+        for i, art in enumerate(_art_sim_obs):
             art.set_data([], [])
 
     # ── Ally detected positions ───────────────────────────────────────────────
@@ -400,6 +447,7 @@ def on_update(key, value):
     global _position_history, _other_robots_history
     global _ball_pos, _ball_hidden_pos, _ball_lost, _ball_vx, _ball_vy, _ball_history
     global _sim_ball_pos, _sim_state, _ally_id, _ally_pos_raw
+    global _raw_robots, _ball_raw
 
     if value is None:
         return
@@ -456,6 +504,12 @@ def on_update(key, value):
 
             elif key == "sim_state":
                 _sim_state = json.loads(value)
+            
+            elif key == "raw_robots":
+                _raw_robots = json.loads(value)
+            
+            elif key == "ball_raw":
+                _ball_raw = json.loads(value)
 
             elif key == "ally_id":
                 try:
@@ -492,6 +546,8 @@ if __name__ == "__main__":
         "ball_history":         lambda v: json.loads(v),
         "sim_state":            lambda v: json.loads(v),
         "ally_id":              lambda v: int(v) if v and v.strip() else None,
+        "raw_robots":           lambda v: json.loads(v),
+        "ball_raw":             lambda v: json.loads(v),
     }
     _TARGETS = {
         "imu_pitch":            "_imu_pitch",
@@ -505,6 +561,8 @@ if __name__ == "__main__":
         "ball_history":         "_ball_history",
         "sim_state":            "_sim_state",
         "ally_id":              "_ally_id",
+        "raw_robots":           "_raw_robots",
+        "ball_raw":             "_ball_raw",
     }
     for key, parse in _SEEDS.items():
         try:

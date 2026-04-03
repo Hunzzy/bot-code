@@ -161,7 +161,7 @@ class SimCooperationReader(BaseCooperationReader):
                     ally_idx = self._ally_idx % len(obstacles)
                     ax, ay   = self._jitter(float(obstacles[ally_idx][0]),
                                             float(obstacles[ally_idx][1]))
-                    data = {"main_robot_pos": {"x": ax, "y": ay, "confidence": 0.9}}
+                    data = {"main_robot_pos": {"x": ax, "y": ay}}
 
                     slot = 1
                     for i, obs in enumerate(obstacles):
@@ -170,13 +170,14 @@ class SimCooperationReader(BaseCooperationReader):
                         if i == ally_idx:
                             continue
                         ox, oy = self._jitter(float(obs[0]), float(obs[1]))
-                        data[f"other_pos_{slot}"] = {"x": ox, "y": oy, "confidence": 0.85}
+                        d = ((ox - ax) ** 2 + (oy - ay) ** 2) ** 0.5
+                        data[f"other_pos_{slot}"] = {"x": ox, "y": oy, "confidence": 5 / d}
                         slot += 1
 
                     if ball is not None:
                         try:
                             bx, by = self._jitter(float(ball["x"]), float(ball["y"]))
-                            data["ball_pos"] = {"x": bx, "y": by, "confidence": 0.8}
+                            data["ball_pos"] = {"x": bx, "y": by}
                         except (KeyError, TypeError, ValueError):
                             pass
 
