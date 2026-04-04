@@ -347,20 +347,24 @@ def _team_game_state(team):
     Compute the offensive game-state for a single team.
 
     Returns {"state": "push"|"attack", "strength": "weak"|"strong"} or None
-    if no robots of this team are in an offensive row.
+    if no robots of this team are in an offensive row *and* the ball is in
+    that same row.
 
     attack takes priority over push when robots are in both zones.
     """
-    positions = _team_positions(team)
+    positions  = _team_positions(team)
     attack_row = _ATTACK_ROW[team]
     push_row   = _PUSH_ROW[team]
+
+    bp = ball_pos()
+    ball_row = row_of(bp["y"]) if bp is not None else None
 
     in_attack = [p for p in positions if row_of(p["y"]) == attack_row]
     in_push   = [p for p in positions if row_of(p["y"]) == push_row]
 
-    if in_attack:
+    if in_attack and ball_row == attack_row:
         return {"state": "attack", "strength": "strong" if len(in_attack) >= 2 else "weak"}
-    if in_push:
+    if in_push and ball_row == push_row:
         return {"state": "push",   "strength": "strong" if len(in_push)   >= 2 else "weak"}
     return None
 
