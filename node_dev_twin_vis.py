@@ -210,9 +210,9 @@ _art_status = ax.text(0.01, 0.99, '', transform=ax.transAxes,
     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
               alpha=0.75, edgecolor='none'))
 
-# Game-state text (inside axes, bottom-left corner)
-_art_game_state = ax.text(0.01, 0.01, '', transform=ax.transAxes,
-    ha='left', va='bottom', fontsize=8, animated=True, zorder=15,
+# Game-state text (outside axes, below the legend on the right)
+_art_game_state = ax.text(1.02, -0.02, '', transform=ax.transAxes,
+    ha='left', va='top', fontsize=8, animated=True, zorder=15, clip_on=False,
     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
               alpha=0.75, edgecolor='none'))
 
@@ -497,9 +497,10 @@ def _redraw():
         _art_ally_main, *_art_ally_det, _art_ally_ball,
         *_art_walls,
         _art_pos_hist, _art_bot_hist,
-        _art_status, _art_game_state,
+        _art_status,
     ]:
         ax.draw_artist(artist)
+    fig.draw_artist(_art_game_state)
     fig.canvas.blit(fig.bbox)
 
 
