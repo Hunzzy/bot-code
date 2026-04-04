@@ -511,7 +511,7 @@ def on_update(key, value):
     global _position_history, _other_robots_history
     global _ball_pos, _ball_hidden_pos, _ball_lost, _ball_vx, _ball_vy, _ball_history
     global _sim_ball_pos, _sim_state, _ally_id, _ally_pos_raw
-    global _raw_robots, _ball_raw
+    global _raw_robots, _ball_raw, _field_sectors
 
     if value is None:
         return
