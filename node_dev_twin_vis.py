@@ -47,6 +47,7 @@ _ally_pos_raw         = {}    # "ally_main_robot_pos" / "ally_other_pos_N" / "al
 _raw_robots           = None  # list of raw robot positions from positioning (without ally)
 _ball_raw             = None  # raw ball position from detection (without ally)
 _field_sectors        = None  # latest field_sectors payload from master node
+_strategy_points      = []   # list of {"x", "y"} from robot_strategy_points
 
 _state_lock   = threading.Lock()
 _needs_redraw = threading.Event()
@@ -204,6 +205,25 @@ _art_ally_main = _ally_marker('D')
 _art_ally_det  = [_ally_marker('x') for _ in range(_MAX_ALLY_OTHERS)]
 _art_ally_ball = _ally_marker('*')   # ally's detected ball position
 
+# Strategy points — green circles + connecting polyline + index labels
+_MAX_STRATEGY_PTS = 5
+_STRATEGY_GREEN   = '#22aa22'
+
+_art_strategy_pts  = []
+_art_strategy_lbls = []
+for _i in range(_MAX_STRATEGY_PTS):
+    _c = patches.Circle((0, 0), 0.025,
+        lw=1.5, edgecolor=_STRATEGY_GREEN, facecolor='#88dd88',
+        zorder=6, animated=True, visible=False)
+    ax.add_patch(_c)
+    _art_strategy_pts.append(_c)
+    _t = ax.text(0, 0, str(_i), ha='center', va='bottom', fontsize=8,
+        color=_STRATEGY_GREEN, fontweight='bold', animated=True, visible=False, zorder=7)
+    _art_strategy_lbls.append(_t)
+
+(_art_strategy_line,) = ax.plot([], [], color=_STRATEGY_GREEN, lw=1.5,
+                                 zorder=5, animated=True)
+
 # Status text (inside axes, top-left corner)
 _art_status = ax.text(0.01, 0.99, '', transform=ax.transAxes,
     ha='left', va='top', fontsize=8, animated=True, zorder=15,
@@ -253,6 +273,9 @@ _legend_handles = [
            label='Walls'),
     Line2D([0], [0], marker='.', color='black', linestyle='None',
            markersize=4, label='Lidar'),
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='#88dd88',
+           markeredgecolor=_STRATEGY_GREEN, markersize=8, label='Strategy point'),
+    Line2D([0], [0], color=_STRATEGY_GREEN, lw=1.5, label='Strategy path'),
 ]
 
 ax.legend(handles=_legend_handles,
@@ -454,6 +477,26 @@ def _redraw():
     else:
         _art_bot_hist.set_offsets(np.empty((0, 2)))
 
+    # ── Strategy points ───────────────────────────────────────────────────────
+    n = len(_strategy_points)
+    for i, (c, lbl) in enumerate(zip(_art_strategy_pts, _art_strategy_lbls)):
+        if i < n:
+            px, py = _strategy_points[i]["x"], _strategy_points[i]["y"]
+            c.set_center((px, py))
+            c.set_visible(True)
+            lbl.set_position((px, py + 0.025 + 0.03))
+            lbl.set_visible(True)
+        else:
+            c.set_visible(False)
+            lbl.set_visible(False)
+    if n >= 2:
+        _art_strategy_line.set_data(
+            [p["x"] for p in _strategy_points],
+            [p["y"] for p in _strategy_points],
+        )
+    else:
+        _art_strategy_line.set_data([], [])
+
     # ── Status text ───────────────────────────────────────────────────────────
     pos_str = f"({origin[0]:.2f}, {origin[1]:.2f})" if known_pos else "unknown"
     _art_status.set_text(
@@ -461,17 +504,14 @@ def _redraw():
         f"walls={len(_walls)}  bots={len(_other_robots)}"
     )
 
-    # ── Game state text ───────────────────────────────────────────────────────
+    # ── Ball control text ─────────────────────────────────────────────────────
     if _field_sectors is not None:
-        gs   = _field_sectors.get("game_state") or {}
-        ctrl = _field_sectors.get("ball_control")
+        ctrl      = _field_sectors.get("ball_control")
+        ctrl_team = _field_sectors.get("controlling_team")
+        bp        = _field_sectors.get("ball")
 
-        state_str    = gs.get("state")    or "—"
-        strength_str = gs.get("strength") or ""
-        team_val     = gs.get("team")
-        side_str     = gs.get("side")     or "—"
-        substate_str = gs.get("substate") or "—"
-        team_str     = f"T{team_val}" if team_val is not None else "—"
+        ball_str = f"({bp['x']:.2f}, {bp['y']:.2f})" if bp else "—"
+        team_str = f"T{ctrl_team}" if ctrl_team is not None else "—"
 
         ctrl_str = "none"
         if ctrl is not None:
@@ -480,16 +520,17 @@ def _redraw():
             ctrl_str = f"self (T{cteam})" if cid is None else f"#{cid} (T{cteam})"
 
         _art_game_state.set_text(
-            f"{strength_str} {state_str}  {team_str}  ·  {side_str}  ·  {substate_str}\n"
-            f"ctrl: {ctrl_str}"
+            f"ball: {ball_str}\n"
+            f"ctrl: {ctrl_str}  [{team_str}]"
         )
     else:
-        _art_game_state.set_text("game state: —")
+        _art_game_state.set_text("ball: —")
 
     # ── Blit ──────────────────────────────────────────────────────────────────
     fig.canvas.restore_region(_bg)
     for artist in [
         _art_lidar,
+        _art_strategy_line, *_art_strategy_pts, *_art_strategy_lbls,
         _art_self, *_art_bots, *_art_blbls,
         _art_arrow,
         _art_ball, _art_ball_hidden, _art_ball_hist, _art_ball_arrow,
@@ -511,7 +552,7 @@ def on_update(key, value):
     global _position_history, _other_robots_history
     global _ball_pos, _ball_hidden_pos, _ball_lost, _ball_vx, _ball_vy, _ball_history
     global _sim_ball_pos, _sim_state, _ally_id, _ally_pos_raw
-    global _raw_robots, _ball_raw, _field_sectors
+    global _raw_robots, _ball_raw, _field_sectors, _strategy_points
 
     if value is None:
         return
@@ -578,6 +619,9 @@ def on_update(key, value):
             elif key == "field_sectors":
                 _field_sectors = json.loads(value)
 
+            elif key == "robot_strategy_points":
+                _strategy_points = json.loads(value)
+
             elif key == "ally_id":
                 try:
                     _ally_id = int(value) if value else None
@@ -615,7 +659,8 @@ if __name__ == "__main__":
         "ally_id":              lambda v: int(v) if v and v.strip() else None,
         "raw_robots":           lambda v: json.loads(v),
         "ball_raw":             lambda v: json.loads(v),
-        "field_sectors":        lambda v: json.loads(v),
+        "field_sectors":           lambda v: json.loads(v),
+        "robot_strategy_points":   lambda v: json.loads(v),
     }
     _TARGETS = {
         "imu_pitch":            "_imu_pitch",
@@ -631,7 +676,8 @@ if __name__ == "__main__":
         "ally_id":              "_ally_id",
         "raw_robots":           "_raw_robots",
         "ball_raw":             "_ball_raw",
-        "field_sectors":        "_field_sectors",
+        "field_sectors":           "_field_sectors",
+        "robot_strategy_points":   "_strategy_points",
     }
     for key, parse in _SEEDS.items():
         try:
@@ -647,7 +693,7 @@ if __name__ == "__main__":
 
     _ally_keys = ["ally_main_robot_pos", "ally_other_pos_1",
                   "ally_other_pos_2", "ally_other_pos_3", "ally_ball_pos"]
-    mb.setcallback(list(_SEEDS.keys()) + _ally_keys, on_update)
+    mb.setcallback(list(_SEEDS.keys()) + _ally_keys + ["robot_strategy_points"], on_update)
     threading.Thread(target=mb.receiver_loop, daemon=True,
                      name="broker-receiver").start()
 
