@@ -190,9 +190,12 @@ def ball_controlled():
 
 # ── Strategy points ───────────────────────────────────────────────────────────
 
-# Centre of our goal opening (bottom, y = 0)
-_OUR_GOAL = (FIELD_WIDTH / 2, 0.0)
+# Goal centres
+_OUR_GOAL   = (FIELD_WIDTH / 2, 0.0)
+_ENEMY_GOAL = (FIELD_WIDTH / 2, FIELD_HEIGHT)
 
+_SHOOT_GRID_N = 15   # grid resolution for LOS search
+_MAX_RANGE = 0.5     # Maximum shooting distance
 
 def _closest_on_segment(ax, ay, bx, by, px, py):
     """Return the point on segment A→B that is closest to P."""
@@ -209,28 +212,97 @@ def _dist_to_segment(ax, ay, bx, by, px, py):
     return math.hypot(px - cx, py - cy)
 
 
+def _find_shooting_position():
+    """Return the field position closest to us that has a clear
+    line of sight to the enemy goal (no robot within ROBOT_RADIUS of the path).
+
+    Searches a _SHOOT_GRID_N × _SHOOT_GRID_N grid sorted by distance to us,
+    returning the first unblocked cell which has clear sight to the goal and ally.  Returns None if every
+    cell is blocked.
+    """
+    gx, gy  = _ENEMY_GOAL
+    robots  = all_robots()
+    n       = _SHOOT_GRID_N
+    sp      = self_pos()
+    # Build candidates sorted closest-to-self first
+    candidates = sorted(
+        (((xi + 0.5) / n * FIELD_WIDTH, (yi + 0.5) / n * FIELD_HEIGHT)
+         for xi in range(n) for yi in range(n)),
+        key=lambda p: math.hypot(p[0] - sp["x"], p[1] - sp["y"]),
+    )
+    for px, py in candidates:
+        print(_dist(px, py, gx, gy))
+        if _dist(px, py, gx, gy) <= _MAX_RANGE and not any(_dist_to_segment(px, py, gx, gy, r["x"], r["y"]) < ROBOT_RADIUS
+                   for r in robots):
+            return px, py
+    return None
+
+
+def _find_passing_position():
+    """Return the field position closest to us that has a clear
+    line of sight to the enemy goal (no robot within ROBOT_RADIUS of the path).
+
+    Searches a _SHOOT_GRID_N × _SHOOT_GRID_N grid sorted by distance to us,
+    returning the first unblocked cell which has clear sight to the goal and ally.  Returns None if every
+    cell is blocked.
+    """
+    gx, gy  = _ENEMY_GOAL
+    robots  = all_robots()
+    n       = _SHOOT_GRID_N
+    sp      = self_pos()
+    ally    = next((r for r in all_robots() if r["team"] == TEAM_US), None)
+    # Build candidates sorted closest-to-self first
+    candidates = sorted(
+        (((xi + 0.5) / n * FIELD_WIDTH, (yi + 0.5) / n * FIELD_HEIGHT)
+         for xi in range(n) for yi in range(n)),
+        key=lambda p: math.hypot(p[0] - sp["x"], p[1] - sp["y"]),
+    )
+    for px, py in candidates:
+        if _dist(px, py, gx, gy) <= _MAX_RANGE and _dist(px, py, ally["x"], ally["y"]) <= _MAX_RANGE and not any(_dist_to_segment(px, py, gx, gy, r["x"], r["y"]) < ROBOT_RADIUS and _dist_to_segment(px, py, ally["x"], ally["y"], r["x"], r["y"]) < ROBOT_RADIUS
+                   for r in robots):
+            return px, py
+    return None
+
+
 def _compute_strategy_points(ctrl):
     """Return the robot_strategy_points list for the current game state.
 
-    Only active when the enemy controls the ball.
+    Our team has the ball
+    ─────────────────────
+    • We control it  → single point at the enemy goal (shoot).
+    • Ally controls  → find the field position closest to the enemy goal with
+                       a clear line of sight to it; single point there.
 
+    Enemy has the ball
+    ──────────────────
     The controlling enemy robot is always the last point (so the connecting
     line shows the intercept direction).  The first point is the suggested
     intercept position for our robot:
+    • If we are closer to the line controller → our goal than the ally: block
+      that shot lane.
+    • Otherwise the ally covers the goal; we cover the pass to the closest
+      other enemy.
 
-      • If *we* (self) are closer to the line controlling-robot → our goal
-        than the ally is, we intercept that passing lane (block the shot).
-
-      • Otherwise the ally is already covering the goal line, so we cover the
-        pass to the next most dangerous enemy: the closest other enemy to the
-        controller.  Our intercept point is the foot of the perpendicular from
-        our position onto that passing lane.
-
-    Returns a list of {"x", "y"} dicts (0 or 2 entries).
+    Returns a list of {"x", "y"} dicts (0, 1, or 2 entries).
     """
-    if ctrl is None or ctrl.get("team") != TEAM_ENEMY:
+    if ctrl is None:
         return []
 
+    if ctrl.get("team") == TEAM_US:
+        if ctrl.get("id") is None:
+            # We have the ball — point at enemy goal
+            pos = _find_shooting_position()
+            if pos is None:
+                return []
+            return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
+        else:
+            # Ally has the ball — best open shooting position
+            pos = _find_passing_position()
+            if pos is None:
+                return []
+            return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
+
+    # ── Enemy control ─────────────────────────────────────────────────────────
     crx, cry = ctrl["x"], ctrl["y"]
     gx, gy   = _OUR_GOAL
 
@@ -243,23 +315,19 @@ def _compute_strategy_points(ctrl):
               if ally else float("inf"))
 
     if d_self <= d_ally:
-        # We are the nearer defender on the goal line — mark that intercept
         if sp:
             ix, iy = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
         else:
             ix, iy = gx, gy
     else:
-        # Ally covers the goal; we cover the pass to the next enemy
         others = [r for r in all_robots()
                   if r["team"] == TEAM_ENEMY and r["id"] != ctrl["id"]]
         if not others:
-            # No second enemy — fall back to goal-line coverage
             if sp:
                 ix, iy = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
             else:
                 ix, iy = gx, gy
         else:
-            # Intercept the pass lane to the closest other enemy
             target = min(others, key=lambda r: math.hypot(r["x"] - crx, r["y"] - cry))
             if sp:
                 ix, iy = _closest_on_segment(
