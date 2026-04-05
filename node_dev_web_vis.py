@@ -486,15 +486,20 @@ function drawStrategyPoints(s) {
         ctx.setLineDash([]);
         ctx.stroke();
     }
-    // Circles
-    for (const p of pts) {
+    // Circles + index labels
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    for (let i = 0; i < pts.length; i++) {
+        const pcx = cx(pts[i].x), pcy = cy(pts[i].y);
         ctx.beginPath();
-        ctx.arc(cx(p.x), cy(p.y), r, 0, 2 * Math.PI);
+        ctx.arc(pcx, pcy, r, 0, 2 * Math.PI);
         ctx.fillStyle = FACE;
         ctx.fill();
         ctx.strokeStyle = EDGE;
         ctx.lineWidth = 1.5;
         ctx.stroke();
+        ctx.fillStyle = EDGE;
+        ctx.fillText(String(i), pcx, pcy - r - 2);
     }
 }
 

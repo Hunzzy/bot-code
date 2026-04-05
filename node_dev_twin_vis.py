@@ -205,17 +205,21 @@ _art_ally_main = _ally_marker('D')
 _art_ally_det  = [_ally_marker('x') for _ in range(_MAX_ALLY_OTHERS)]
 _art_ally_ball = _ally_marker('*')   # ally's detected ball position
 
-# Strategy points — green circles + connecting polyline
+# Strategy points — green circles + connecting polyline + index labels
 _MAX_STRATEGY_PTS = 5
 _STRATEGY_GREEN   = '#22aa22'
 
-_art_strategy_pts = []
-for _ in range(_MAX_STRATEGY_PTS):
+_art_strategy_pts  = []
+_art_strategy_lbls = []
+for _i in range(_MAX_STRATEGY_PTS):
     _c = patches.Circle((0, 0), 0.025,
         lw=1.5, edgecolor=_STRATEGY_GREEN, facecolor='#88dd88',
         zorder=6, animated=True, visible=False)
     ax.add_patch(_c)
     _art_strategy_pts.append(_c)
+    _t = ax.text(0, 0, str(_i), ha='center', va='bottom', fontsize=8,
+        color=_STRATEGY_GREEN, fontweight='bold', animated=True, visible=False, zorder=7)
+    _art_strategy_lbls.append(_t)
 
 (_art_strategy_line,) = ax.plot([], [], color=_STRATEGY_GREEN, lw=1.5,
                                  zorder=5, animated=True)
@@ -475,12 +479,16 @@ def _redraw():
 
     # ── Strategy points ───────────────────────────────────────────────────────
     n = len(_strategy_points)
-    for i, c in enumerate(_art_strategy_pts):
+    for i, (c, lbl) in enumerate(zip(_art_strategy_pts, _art_strategy_lbls)):
         if i < n:
-            c.set_center((_strategy_points[i]["x"], _strategy_points[i]["y"]))
+            px, py = _strategy_points[i]["x"], _strategy_points[i]["y"]
+            c.set_center((px, py))
             c.set_visible(True)
+            lbl.set_position((px, py + 0.025 + 0.03))
+            lbl.set_visible(True)
         else:
             c.set_visible(False)
+            lbl.set_visible(False)
     if n >= 2:
         _art_strategy_line.set_data(
             [p["x"] for p in _strategy_points],
@@ -522,7 +530,7 @@ def _redraw():
     fig.canvas.restore_region(_bg)
     for artist in [
         _art_lidar,
-        _art_strategy_line, *_art_strategy_pts,
+        _art_strategy_line, *_art_strategy_pts, *_art_strategy_lbls,
         _art_self, *_art_bots, *_art_blbls,
         _art_arrow,
         _art_ball, _art_ball_hidden, _art_ball_hist, _art_ball_arrow,
