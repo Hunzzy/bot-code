@@ -5,23 +5,26 @@ import math
 import numpy as np
 import threading
 import time
+import sys
+import cv2
 
-# ── Camera specifications (Raspberry Pi Camera V2) ─────────────────────────────
-FOV_DEG    = 62.2   # Horizontaler Blickwinkel der Pi Camera V2
-RES_WIDTH  = 160    # Native 4:3 Format für maximale CPU-Schonung
+# ── Camera specifications (Raspberry Pi Camera V2 / Webcam) ──────────────────
+FOV_DEG    = 62.2   # Horizontaler Blickwinkel der Pi Camera V2 (für PC-Webcam oft ~52.0°)
+RES_WIDTH  = 160    # Native 4:3 Format für maximale CPU-Schonung auf RPi Zero
 RES_HEIGHT = 120    
 CENTER_X   = RES_WIDTH / 2.0
 
 # ── Image Masking (Zuschauer-Zensur) ───────────────────────────────────────────
-CENSOR_TOP_HEIGHT_PX = 30  # Oberste 30 Pixel schwärzen (T-Shirts ignorieren)
+CENSOR_TOP_HEIGHT_PX = 30  # Oberste 30 Pixel schwärzen (Bunte T-Shirts ausblenden)
 
 # ── Colour filter (HSV) ────────────────────────────────────────────────────────
+# Trage hier eure perfekten Werte ein, die ihr mit dem Kalibrierungs-Skript gefunden habt
 LOWER_ORANGE = (5, 31, 166)
 UPPER_ORANGE = (19, 151, 255)
 
 # ── Detection thresholds ───────────────────────────────────────────────────────
-DEADZONE_PIXELS = 10  
-MIN_RADIUS      = 1   
+DEADZONE_PIXELS = 10  # Toleranz-Bereich für "FORWARD"
+MIN_RADIUS      = 1   # Mindestradius in Pixel
 
 # ── Ball physical size & Robot geometry ────────────────────────────────────────
 BALL_RADIUS_MM = 21.0
@@ -30,7 +33,7 @@ FIELD_WIDTH  = 1.82
 FIELD_HEIGHT = 2.43
 BROKER_KEY = "ball_raw"
 
-SIM_REPLACE = False  # Auf False setzen für den ECHTEN Roboter (Picamera2)
+SIM_REPLACE = True  # Setze dies auf True, um ABSICHTLICH den Digital Twin zu nutzen
 
 # ── ADAPTIVE EXPONENTIAL MOVING AVERAGE (AEMA) SETUP ──────────────────────────
 AEMA_ALPHA_MIN = 0.08  # Starke Glättung bei Rauschen
@@ -38,6 +41,7 @@ AEMA_ALPHA_MAX = 0.5   # Schnelle Reaktion bei echter Bewegung
 AEMA_THRESHOLD = 0.15  
 
 class AdaptiveEMA:
+    """Intelligenter Filter, der Wackeln ignoriert, aber bei Bewegung sofort reagiert."""
     def __init__(self, alpha_min=AEMA_ALPHA_MIN, alpha_max=AEMA_ALPHA_MAX, threshold=AEMA_THRESHOLD):
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
@@ -81,15 +85,8 @@ _robot_pos = None
 _imu_pitch = None
 _sim_state = None
 
-_hw_available = False
-try:
-    import cv2
-    _hw_available = True
-except ImportError as e:
-    print(f"[VISION] OpenCV not available ({e}) — node will not run.")
-
-
 def _process_frame(frame):
+    """Das Gehirn der Bildverarbeitung (aus dem Kalibrierungsskript übernommen)."""
     # 🚫 ZUSCHAUER-ZENSUR
     if CENSOR_TOP_HEIGHT_PX > 0:
         frame[0:CENSOR_TOP_HEIGHT_PX, :] = (0, 0, 0)
@@ -122,6 +119,7 @@ def _process_frame(frame):
         return {"command": "NO_BALL", "distance_cm": 0.0,
                 "angle_deg": 0.0, "x_center": -1, "radius": -1}
 
+    # Trigonometrische Mathematik für den Pi Zero
     diameter_px = radius * 2.0
     Ow_deg = (FOV_DEG / RES_WIDTH) * diameter_px
     Ow_rad = math.radians(Ow_deg)
@@ -140,7 +138,7 @@ def _process_frame(frame):
 
 
 class _SimBall:
-    # (Simulation code remains the same...)
+    """Der geniale Digital Twin von eurem Projekt."""
     FIELD_W  = 1.82
     FIELD_H  = 2.43
     BALL_R   = BALL_RADIUS_MM / 1000.0
@@ -284,11 +282,10 @@ def _compute_global_pos(distance_cm, angle_deg):
         "y": round(cam_y + dist_m * math.sin(bearing), 3),
     }
 
-
+# ==============================================================================
+# MAIN ENTRY POINT
+# ==============================================================================
 if __name__ == "__main__":
-    if not _hw_available:
-        raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
-
     try:
         val = mb.get("robot_position")
         if val is not None:
@@ -309,41 +306,56 @@ if __name__ == "__main__":
 
     print("[VISION] Starting headless vision system...")
 
-    # 🚀 SETUP FÜR PICAMERA 2 ODER SIMULATION
+    # 🚀 ROBUSTES KAMERA/SIMULATION SETUP
     picam2 = None
+    cap = None
+    sim = None
+
     if SIM_REPLACE:
         sim = _SimBall()
-        print("[VISION] SIM_REPLACE=True — using simulated ball.")
+        print("[VISION] SIM_REPLACE=True — using simulated ball (Digital Twin).")
     else:
         try:
-            # Picamera2 importieren und GPU-Resizing erzwingen!
+            # 1. VERSUCH: Raspberry Pi Picamera2
             from picamera2 import Picamera2
             picam2 = Picamera2()
-            
-            # Format BGR888 ist perfekt für OpenCV. Die Hardware verkleinert das Bild sofort!
             config = picam2.create_video_configuration(main={"size": (RES_WIDTH, RES_HEIGHT), "format": "BGR888"})
             picam2.configure(config)
             picam2.start()
-            
-            sim = None
-            print(f"[VISION] 🚀 Picamera2 started successfully! Hardware Resize: {RES_WIDTH}x{RES_HEIGHT}.")
+            print(f"[VISION] 🚀 Hardware Picamera2 gestartet ({RES_WIDTH}x{RES_HEIGHT}).")
         except Exception as e:
-            print(f"[VISION] Picamera2 ERROR ({e}). Are you on Windows? Falling back to Simulation.")
-            picam2 = None
-            sim = _SimBall()
+            # 2. VERSUCH: USB-Webcam (Für den PC)
+            print(f"[VISION] Picamera2 nicht gefunden ({e}). Teste USB-Webcam...")
+            cap = cv2.VideoCapture(0)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, RES_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_HEIGHT)
+            
+            if cap.isOpened():
+                print(f"[VISION] USB Webcam geoeffnet. (Achtung: FOV muss evtl. angepasst werden)")
+            else:
+                # 3. VERSUCH: Fallback auf Simulation (Digital Twin)
+                cap.release()
+                cap = None
+                sim = _SimBall()
+                print("[VISION] KEINE KAMERA GEFUNDEN! Wechsle sicherheitshalber in den Digital Twin-Modus.")
 
     print(f"[VISION] Censor Box Active: Top {CENSOR_TOP_HEIGHT_PX} pixels will be ignored.")
     last_log_time = time.time()
 
     try:
         while True:
-            # 📸 BILD EINLESEN (0% CPU Overhead mit Picam2)
+            # 📸 ROBUSTES EINLESEN (Egal welche Kamera / Simulation aktiv ist)
             if sim is not None:
                 frame = sim.render()
             elif picam2 is not None:
                 frame = picam2.capture_array()
-            else:
-                break
+            elif cap is not None:
+                ret, frame = cap.read()
+                if not ret:
+                    print("[VISION] ERROR: Camera connection lost!")
+                    break
+                # Wenn es die Webcam ist, erzwinge die richtige Groesse!
+                frame = cv2.resize(frame, (RES_WIDTH, RES_HEIGHT), interpolation=cv2.INTER_NEAREST)
 
             with _perf.measure("frame"):
                 result = _process_frame(frame)
@@ -395,7 +407,10 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[VISION] Stopped by user.")
     finally:
+        # Sauberes Beenden von jeglicher Hardware
         if picam2 is not None:
             picam2.stop()
+        if cap is not None:
+            cap.release()
         mb.close()
         print("[VISION] Camera closed. System stopped.")
