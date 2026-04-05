@@ -217,8 +217,8 @@ for _i in range(_MAX_STRATEGY_PTS):
         zorder=6, animated=True, visible=False)
     ax.add_patch(_c)
     _art_strategy_pts.append(_c)
-    _t = ax.text(0, 0, str(_i), ha='center', va='bottom', fontsize=8,
-        color=_STRATEGY_GREEN, fontweight='bold', animated=True, visible=False, zorder=7)
+    _t = ax.text(0, 0, str(_i), ha='center', va='center', fontsize=8,
+        color='black', fontweight='bold', animated=True, visible=False, zorder=7)
     _art_strategy_lbls.append(_t)
 
 (_art_strategy_line,) = ax.plot([], [], color=_STRATEGY_GREEN, lw=1.5,
@@ -484,15 +484,16 @@ def _redraw():
             px, py = _strategy_points[i]["x"], _strategy_points[i]["y"]
             c.set_center((px, py))
             c.set_visible(True)
-            lbl.set_position((px, py + 0.025 + 0.03))
+            lbl.set_position((px, py))
             lbl.set_visible(True)
         else:
             c.set_visible(False)
             lbl.set_visible(False)
-    if n >= 2:
+    if n >= 1:
+        pos = _robot_pos
         _art_strategy_line.set_data(
-            [p["x"] for p in _strategy_points],
-            [p["y"] for p in _strategy_points],
+            [pos[0]] + [p["x"] for p in _strategy_points],
+            [pos[1]] + [p["y"] for p in _strategy_points],
         )
     else:
         _art_strategy_line.set_data([], [])
@@ -530,8 +531,8 @@ def _redraw():
     fig.canvas.restore_region(_bg)
     for artist in [
         _art_lidar,
-        _art_strategy_line, *_art_strategy_pts, *_art_strategy_lbls,
         _art_self, *_art_bots, *_art_blbls,
+        _art_strategy_line, *_art_strategy_pts, *_art_strategy_lbls,
         _art_arrow,
         _art_ball, _art_ball_hidden, _art_ball_hist, _art_ball_arrow,
         _art_sim_ball, _art_sim_self, *_art_sim_obs,
