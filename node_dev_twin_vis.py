@@ -217,8 +217,8 @@ for _i in range(_MAX_STRATEGY_PTS):
         zorder=6, animated=True, visible=False)
     ax.add_patch(_c)
     _art_strategy_pts.append(_c)
-    _t = ax.text(0, 0, str(_i), ha='center', va='bottom', fontsize=8,
-        color=_STRATEGY_GREEN, fontweight='bold', animated=True, visible=False, zorder=7)
+    _t = ax.text(0, 0, str(_i), ha='center', va='center', fontsize=8,
+        color='black', fontweight='bold', animated=True, visible=False, zorder=7)
     _art_strategy_lbls.append(_t)
 
 (_art_strategy_line,) = ax.plot([], [], color=_STRATEGY_GREEN, lw=1.5,
@@ -484,7 +484,7 @@ def _redraw():
             px, py = _strategy_points[i]["x"], _strategy_points[i]["y"]
             c.set_center((px, py))
             c.set_visible(True)
-            lbl.set_position((px, py + 0.025 + 0.03))
+            lbl.set_position((px, py))
             lbl.set_visible(True)
         else:
             c.set_visible(False)

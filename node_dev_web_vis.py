@@ -488,7 +488,7 @@ function drawStrategyPoints(s) {
     }
     // Circles + index labels
     ctx.font = 'bold 11px monospace';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     for (let i = 0; i < pts.length; i++) {
         const pcx = cx(pts[i].x), pcy = cy(pts[i].y);
         ctx.beginPath();
@@ -498,8 +498,8 @@ function drawStrategyPoints(s) {
         ctx.strokeStyle = EDGE;
         ctx.lineWidth = 1.5;
         ctx.stroke();
-        ctx.fillStyle = EDGE;
-        ctx.fillText(String(i), pcx, pcy - r - 2);
+        ctx.fillStyle = 'black';
+        ctx.fillText(String(i), pcx, pcy);
     }
 }
 
