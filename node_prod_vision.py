@@ -6,50 +6,38 @@ import numpy as np
 import threading
 import time
 
-# ── Camera specifications (Raspberry Pi Camera V2 / Webcam) ──────────────────
-FOV_DEG    = 62.2   # Horizontaler Blickwinkel der Pi Camera V2 (62.2°) - (Für Webcam auf 52.0 ändern)
-RES_WIDTH  = 160    # Native 4:3 Format für maximale CPU-Schonung auf RPi Zero
-RES_HEIGHT = 120    # 160x120 ist sehr schnell zu verarbeiten
+# ── Camera specifications (Raspberry Pi Camera V2) ─────────────────────────────
+FOV_DEG    = 62.2   # Horizontaler Blickwinkel der Pi Camera V2
+RES_WIDTH  = 160    # Native 4:3 Format für maximale CPU-Schonung
+RES_HEIGHT = 120    
 CENTER_X   = RES_WIDTH / 2.0
 
 # ── Image Masking (Zuschauer-Zensur) ───────────────────────────────────────────
-# Da das Bild 120 Pixel hoch ist, schneiden wir z.B. die obersten 30 Pixel ab.
-# Alles in diesem Bereich wird komplett schwarz und vom Filter ignoriert.
-CENSOR_TOP_HEIGHT_PX = 30  
+CENSOR_TOP_HEIGHT_PX = 30  # Oberste 30 Pixel schwärzen (T-Shirts ignorieren)
 
 # ── Colour filter (HSV) ────────────────────────────────────────────────────────
 LOWER_ORANGE = (5, 31, 166)
 UPPER_ORANGE = (19, 151, 255)
 
 # ── Detection thresholds ───────────────────────────────────────────────────────
-DEADZONE_PIXELS = 10  # Toleranz-Bereich für "FORWARD" in der Mitte
-MIN_RADIUS      = 1   # Ball ist sehr klein in 160x120, daher Mindestradius 1 Pixel
+DEADZONE_PIXELS = 10  
+MIN_RADIUS      = 1   
 
-# ── Ball physical size ─────────────────────────────────────────────────────────
+# ── Ball physical size & Robot geometry ────────────────────────────────────────
 BALL_RADIUS_MM = 21.0
-
-# ── Robot geometry ────────────────────────────────────────────────────────────
 ROBOT_RADIUS = 0.09
-
-# ── Field dimensions ──────────────────────────────────────────────────────────
 FIELD_WIDTH  = 1.82
 FIELD_HEIGHT = 2.43
-
-# ── Broker key ────────────────────────────────────────────────────────────────
 BROKER_KEY = "ball_raw"
 
-SIM_REPLACE = True  # Auf False setzen, wenn echte Kamera genutzt wird
+SIM_REPLACE = False  # Auf False setzen für den ECHTEN Roboter (Picamera2)
 
 # ── ADAPTIVE EXPONENTIAL MOVING AVERAGE (AEMA) SETUP ──────────────────────────
-AEMA_ALPHA_MIN = 0.08  # Minimale Glättung (bei Rauschen)
-AEMA_ALPHA_MAX = 0.5   # Maximale Reaktion (bei schneller Bewegung)
-AEMA_THRESHOLD = 0.15  # Schwelle zur Aktivierung von Alpha_max (proportional zur Änderung)
+AEMA_ALPHA_MIN = 0.08  # Starke Glättung bei Rauschen
+AEMA_ALPHA_MAX = 0.5   # Schnelle Reaktion bei echter Bewegung
+AEMA_THRESHOLD = 0.15  
 
 class AdaptiveEMA:
-    """
-    Lightweight adaptive Exponential Moving Average Filter.
-    Reagiert schnell auf echte Bewegungen, glättet aber aggressiv bei Rauschen.
-    """
     def __init__(self, alpha_min=AEMA_ALPHA_MIN, alpha_max=AEMA_ALPHA_MAX, threshold=AEMA_THRESHOLD):
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
@@ -66,11 +54,7 @@ class AdaptiveEMA:
         else:
             relative_change = abs(measurement - self.estimate)
         
-        if relative_change > self.threshold:
-            alpha = self.alpha_max  
-        else:
-            alpha = self.alpha_min  
-        
+        alpha = self.alpha_max if relative_change > self.threshold else self.alpha_min  
         self.estimate = alpha * measurement + (1.0 - alpha) * self.estimate
         return self.estimate
     
@@ -106,27 +90,26 @@ except ImportError as e:
 
 
 def _process_frame(frame):
-    """
-    Verarbeitet Frame mit HSV-Filterung und Konturerkennung.
-    """
-    # ════════════════════════════════════════════════════════════════════
-    # 🚫 ZUSCHAUER-ZENSUR (BLACK CENSOR)
-    # Schwärzt den oberen Rand des Bildes, um bunte T-Shirts zu ignorieren
-    # Numpy Slicing kostet fast 0 CPU Leistung!
-    # ════════════════════════════════════════════════════════════════════
+    # 🚫 ZUSCHAUER-ZENSUR
     if CENSOR_TOP_HEIGHT_PX > 0:
         frame[0:CENSOR_TOP_HEIGHT_PX, :] = (0, 0, 0)
 
     hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv,
-                       np.array(LOWER_ORANGE),
-                       np.array(UPPER_ORANGE))
+    mask = cv2.inRange(hsv, np.array(LOWER_ORANGE), np.array(UPPER_ORANGE))
 
     mask = cv2.erode(mask,  None, iterations=1) 
     mask = cv2.dilate(mask, None, iterations=1)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
+    # 📡 RADAR-PIXEL FÜR DEN PC (PIXEL TRANSLATOR)
+    small_mask = cv2.resize(mask, (30, 30), interpolation=cv2.INTER_NEAREST)
+    y_coords, x_coords = np.where(small_mask > 0)
+    
+    radar_payload = {}
+    for i in range(min(len(x_coords), 50)):
+        radar_payload[f"p{i+1}"] = [int(x_coords[i]), int(y_coords[i])]
+    mb.set("radar_pixels", json.dumps(radar_payload))
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return {"command": "NO_BALL", "distance_cm": 0.0,
@@ -139,7 +122,6 @@ def _process_frame(frame):
         return {"command": "NO_BALL", "distance_cm": 0.0,
                 "angle_deg": 0.0, "x_center": -1, "radius": -1}
 
-    # --- DIE MATHEMATIK ---
     diameter_px = radius * 2.0
     Ow_deg = (FOV_DEG / RES_WIDTH) * diameter_px
     Ow_rad = math.radians(Ow_deg)
@@ -158,6 +140,7 @@ def _process_frame(frame):
 
 
 class _SimBall:
+    # (Simulation code remains the same...)
     FIELD_W  = 1.82
     FIELD_H  = 2.43
     BALL_R   = BALL_RADIUS_MM / 1000.0
@@ -178,19 +161,16 @@ class _SimBall:
 
     def _all_robots(self):
         state = _sim_state
-        if state is None:
-            return []
+        if state is None: return []
         robots = []
         r = state.get("robot")
-        if r:
-            robots.append((float(r[0]), float(r[1])))
+        if r: robots.append((float(r[0]), float(r[1])))
         robots += [(float(p[0]), float(p[1])) for p in state.get("obstacles", [])]
         return robots
 
     def _obstacle_robots(self):
         state = _sim_state
-        if state is None:
-            return []
+        if state is None: return []
         return [(float(p[0]), float(p[1])) for p in state.get("obstacles", [])]
 
     def _random_position(self):
@@ -207,14 +187,11 @@ class _SimBall:
     def _is_occluded(self, cx, cy, bx, by):
         dx, dy     = bx - cx, by - cy
         seg_len_sq = dx * dx + dy * dy
-        if seg_len_sq < 1e-12:
-            return False
+        if seg_len_sq < 1e-12: return False
         for rx, ry in self._obstacle_robots():
-            t = max(0.0, min(1.0,
-                ((rx - cx) * dx + (ry - cy) * dy) / seg_len_sq))
+            t = max(0.0, min(1.0, ((rx - cx) * dx + (ry - cy) * dy) / seg_len_sq))
             closest_dist = math.hypot(cx + t * dx - rx, cy + t * dy - ry)
-            if closest_dist < ROBOT_RADIUS:
-                return True
+            if closest_dist < ROBOT_RADIUS: return True
         return False
 
     def render(self):
@@ -225,24 +202,20 @@ class _SimBall:
         self._x += self._vx * dt
         self._y += self._vy * dt
 
-        if self._x < self.MARGIN:
-            self._x  = self.MARGIN;              self._vx =  abs(self._vx)
-        elif self._x > self.FIELD_W - self.MARGIN:
-            self._x  = self.FIELD_W - self.MARGIN; self._vx = -abs(self._vx)
-        if self._y < self.MARGIN:
-            self._y  = self.MARGIN;              self._vy =  abs(self._vy)
-        elif self._y > self.FIELD_H - self.MARGIN:
-            self._y  = self.FIELD_H - self.MARGIN; self._vy = -abs(self._vy)
+        if self._x < self.MARGIN: self._x = self.MARGIN; self._vx = abs(self._vx)
+        elif self._x > self.FIELD_W - self.MARGIN: self._x = self.FIELD_W - self.MARGIN; self._vx = -abs(self._vx)
+        if self._y < self.MARGIN: self._y = self.MARGIN; self._vy = abs(self._vy)
+        elif self._y > self.FIELD_H - self.MARGIN: self._y = self.FIELD_H - self.MARGIN; self._vy = -abs(self._vy)
 
         sep = ROBOT_RADIUS + self.BALL_R
         for rx, ry in self._all_robots():
             dx, dy = self._x - rx, self._y - ry
             dist   = math.hypot(dx, dy)
             if 0 < dist < sep:
-                nx, ny    = dx / dist, dy / dist
-                self._x   = rx + nx * sep
-                self._y   = ry + ny * sep
-                dot        = self._vx * nx + self._vy * ny
+                nx, ny  = dx / dist, dy / dist
+                self._x = rx + nx * sep
+                self._y = ry + ny * sep
+                dot     = self._vx * nx + self._vy * ny
                 if dot < 0:
                     self._vx -= 2 * dot * nx
                     self._vy -= 2 * dot * ny
@@ -284,29 +257,22 @@ class _SimBall:
 
 def _on_broker_update(key, value):
     global _robot_pos, _imu_pitch, _sim_state
-    if value is None:
-        return
+    if value is None: return
     if key == "robot_position":
         try:
             p = json.loads(value)
             _robot_pos = (float(p["x"]), float(p["y"]))
-        except Exception:
-            pass
+        except: pass
     elif key == "imu_pitch":
-        try:
-            _imu_pitch = float(value)
-        except Exception:
-            pass
+        try: _imu_pitch = float(value)
+        except: pass
     elif key == "sim_state":
-        try:
-            _sim_state = json.loads(value)
-        except Exception:
-            pass
+        try: _sim_state = json.loads(value)
+        except: pass
 
 
 def _compute_global_pos(distance_cm, angle_deg):
-    if _robot_pos is None or _imu_pitch is None:
-        return None
+    if _robot_pos is None or _imu_pitch is None: return None
     rx, ry      = _robot_pos
     heading_rad = math.radians(_imu_pitch)
     cam_x = rx + ROBOT_RADIUS * math.cos(heading_rad)
@@ -328,61 +294,56 @@ if __name__ == "__main__":
         if val is not None:
             p = json.loads(val)
             _robot_pos = (float(p["x"]), float(p["y"]))
-    except Exception:
-        pass
+    except: pass
     try:
         val = mb.get("imu_pitch")
-        if val is not None:
-            _imu_pitch = float(val)
-    except Exception:
-        pass
+        if val is not None: _imu_pitch = float(val)
+    except: pass
     try:
         val = mb.get("sim_state")
-        if val is not None:
-            _sim_state = json.loads(val)
-    except Exception:
-        pass
+        if val is not None: _sim_state = json.loads(val)
+    except: pass
+    
     mb.setcallback(["robot_position", "imu_pitch", "sim_state"], _on_broker_update)
-    threading.Thread(target=mb.receiver_loop, daemon=True,
-                     name="broker-receiver").start()
+    threading.Thread(target=mb.receiver_loop, daemon=True, name="broker-receiver").start()
 
     print("[VISION] Starting headless vision system...")
 
+    # 🚀 SETUP FÜR PICAMERA 2 ODER SIMULATION
+    picam2 = None
     if SIM_REPLACE:
-        cap = None
         sim = _SimBall()
         print("[VISION] SIM_REPLACE=True — using simulated ball.")
     else:
-        cap = cv2.VideoCapture(0)
-        
-        # Kamera-Wünsche setzen
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  RES_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_HEIGHT)
-
-        if cap.isOpened():
-            print(f"[VISION] Camera opened. Running detection loop (Ctrl+C to stop)...")
+        try:
+            # Picamera2 importieren und GPU-Resizing erzwingen!
+            from picamera2 import Picamera2
+            picam2 = Picamera2()
+            
+            # Format BGR888 ist perfekt für OpenCV. Die Hardware verkleinert das Bild sofort!
+            config = picam2.create_video_configuration(main={"size": (RES_WIDTH, RES_HEIGHT), "format": "BGR888"})
+            picam2.configure(config)
+            picam2.start()
+            
             sim = None
-        else:
-            cap.release()
-            cap = None
+            print(f"[VISION] 🚀 Picamera2 started successfully! Hardware Resize: {RES_WIDTH}x{RES_HEIGHT}.")
+        except Exception as e:
+            print(f"[VISION] Picamera2 ERROR ({e}). Are you on Windows? Falling back to Simulation.")
+            picam2 = None
             sim = _SimBall()
-            print("[VISION] Camera not available — falling back to simulated ball.")
 
     print(f"[VISION] Censor Box Active: Top {CENSOR_TOP_HEIGHT_PX} pixels will be ignored.")
     last_log_time = time.time()
 
     try:
         while True:
+            # 📸 BILD EINLESEN (0% CPU Overhead mit Picam2)
             if sim is not None:
                 frame = sim.render()
+            elif picam2 is not None:
+                frame = picam2.capture_array()
             else:
-                ret, frame = cap.read()
-                if not ret:
-                    print("[VISION] ERROR: Camera connection lost!")
-                    break
-
-                # 🚀 WICHTIG: Das Bild sofort und gnadenlos auf unsere Wunschauflösung zwingen!
-                frame = cv2.resize(frame, (RES_WIDTH, RES_HEIGHT), interpolation=cv2.INTER_NEAREST)
+                break
 
             with _perf.measure("frame"):
                 result = _process_frame(frame)
@@ -434,7 +395,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[VISION] Stopped by user.")
     finally:
-        if cap is not None:
-            cap.release()
+        if picam2 is not None:
+            picam2.stop()
         mb.close()
         print("[VISION] Camera closed. System stopped.")
